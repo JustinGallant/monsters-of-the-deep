@@ -14,7 +14,9 @@ Fight waves of monsters, collect scrap and cores, and upgrade your base to survi
 **Install pygame:**
 ```bash
 pip install pygame
+```
 
 **Running**
 ```bash
 python3 monsters-of-the-deep.py
+```
