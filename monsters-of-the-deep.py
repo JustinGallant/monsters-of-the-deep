@@ -363,6 +363,25 @@ class World:
         for i,l in enumerate(lines):
             panel.blit(font.render(l,True,WHITE),(12,12+i*24))
         screen.blit(panel,(WIDTH-400, HEIGHT-280))
+    def draw_pause_menu(self,screen):
+        overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, 160))  # translucent dark overlay
+        screen.blit(overlay, (0, 0))
+
+        title_font = pygame.font.SysFont("consolas", 36, bold=True)
+        item_font  = pygame.font.SysFont("consolas", 22)
+
+        title = title_font.render("PAUSED", True, (255, 255, 255))
+        screen.blit(title, (WIDTH//2 - title.get_width()//2, HEIGHT//2 - 120))
+
+        items = [
+            "Resume — Esc or P",
+            "Restart — R",
+            "Quit — Q",
+        ]
+        for i, text in enumerate(items):
+            surf = item_font.render(text, True, (230, 230, 230))
+            screen.blit(surf, (WIDTH//2 - surf.get_width()//2, HEIGHT//2 - 40 + i*36))
 
 class Player:
     def __init__(self, world, pos):
@@ -434,6 +453,7 @@ def main():
     pygame.display.set_caption("Monsters of the Deep — roguelite prototype")
     clock=pygame.time.Clock()
     world=World()
+    paused=False
     font=pygame.font.SysFont("consolas",18)
     # Controls help toast
     help_lines=[
@@ -450,35 +470,63 @@ def main():
 
     running=True
     while running:
-        dt=clock.tick(FPS)/1000.0
+        dt = clock.tick(FPS) / 1000.0
+
         for ev in pygame.event.get():
-            if ev.type==pygame.QUIT:
-                running=False
-            elif ev.type==pygame.KEYDOWN:
-                if ev.key==pygame.K_r:
-                    world=World()
-                elif ev.key==pygame.K_e:
-                    world.deposit()
-                elif ev.key==pygame.K_b:
-                    world.open_shop()
-                elif ev.key==pygame.K_ESCAPE:
-                    world.player.in_shop=False
-                elif world.player.in_shop:
-                    if ev.key in (pygame.K_1,pygame.K_2,pygame.K_3,pygame.K_4,pygame.K_5,pygame.K_6):
-                        idx={pygame.K_1:"speed", pygame.K_2:"damage", pygame.K_3:"hp", pygame.K_4:"capacity", pygame.K_5:"turret", pygame.K_6:"basehp"}[ev.key]
+            if ev.type == pygame.QUIT:
+                running = False
+            elif ev.type == pygame.KEYDOWN:
+                # Toggle pause (works even if not on base / shop closed)
+                if ev.key in (pygame.K_p, pygame.K_ESCAPE):
+                    if world.player.in_shop:
+                        world.player.in_shop = False
+                    else:
+                        paused = not paused
+
+                # When paused, handle pause menu actions
+                elif paused:
+                    if ev.key == pygame.K_r:      # Restart from pause
+                        world = World()
+                        paused = False
+                    elif ev.key == pygame.K_q:    # Quit from pause
+                        running = False
+
+                # Normal (unpaused) gameplay keys:
+                elif not paused:
+                    if ev.key == pygame.K_r:
+                        world = World()
+                    elif ev.key == pygame.K_e:
+                        world.deposit()
+                    elif ev.key == pygame.K_b:
+                        world.open_shop()
+                    elif world.player.in_shop and ev.key in (
+                        pygame.K_1, pygame.K_2, pygame.K_3, pygame.K_4, pygame.K_5, pygame.K_6
+                    ):
+                        idx = {
+                            pygame.K_1:"speed", pygame.K_2:"damage", pygame.K_3:"hp",
+                            pygame.K_4:"capacity", pygame.K_5:"turret", pygame.K_6:"basehp"
+                        }[ev.key]
                         world.buy(idx)
-                elif ev.key==pygame.K_p:
-                    world.player.scrap+=10
-                    world.player.cores+=10
-        if not world.player.in_shop:
+
+        # ---- frame update/draw (inside the while loop) ----
+        if (not paused) and (not world.player.in_shop) and world.base_hp > 0:
             world.update(dt)
+
         world.draw(screen)
-        # help toast
-        if help_timer>0:
-            help_timer-=dt
-            screen.blit(helpsurf,(10,HEIGHT-helpsurf.get_height()-10))
+
+        if paused:
+            world.draw_pause_menu(screen)
+
+        # One-time help toast
+        if help_timer > 0:
+            help_timer -= dt
+            screen.blit(helpsurf, (10, HEIGHT - helpsurf.get_height() - 10))
+
         pygame.display.flip()
+
+    # after loop ends
     pygame.quit()
+
 
 if __name__=="__main__":
     main()
