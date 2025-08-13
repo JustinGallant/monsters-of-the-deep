@@ -13,6 +13,7 @@ FPS = 60
 # Colors
 WHITE=(255,255,255); BLACK=(0,0,0); GREY=(60,60,60)
 GREEN=(80,210,120); RED=(220,70,70); YELLOW=(240,210,90); BLUE=(80,160,240); PURPLE=(170,90,210)
+ORANGE=(240,140,60); CYAN=(120,210,230)
 
 # ----------------------------
 # Helper math
@@ -78,38 +79,90 @@ def bfs_next_step(grid, start, goal):
 # Entities
 # ----------------------------
 class Bullet:
-    def __init__(self,pos,vel,damage=1,life=1.5):
+    def __init__(self,pos,vel,damage=1,life=1.5, dot_dps=0, dot_dur=0, slow_factor=1.0, slow_dur=0, color=YELLOW):
         self.x,self.y = pos
         self.vx,self.vy = vel
         self.damage=damage
         self.life=life
         self.alive=True
+        self.dot_dps = dot_dps
+        self.dot_dur = dot_dur
+        self.slow_factor = slow_factor
+        self.slow_dur = slow_dur
+        self.color = color
+        # NEW: let bullets escape the wall they spawn in (for wall-mounted turrets)
+        self.dist_traveled = 0.0
+        self.grace_dist = 12  # pixels of travel before wall collision is checked
+
     def update(self,dt,world):
         if not self.alive: return
-        self.x+=self.vx*dt; self.y+=self.vy*dt
-        self.life-=dt
-        if self.life<=0: self.alive=False
-        gx,gy=int(self.x//TILE), int(self.y//TILE)
-        if world.is_solid(gx,gy): self.alive=False
+        dx = self.vx*dt; dy = self.vy*dt
+        self.x += dx; self.y += dy
+        self.dist_traveled += math.hypot(dx, dy)
+
+        self.life -= dt
+        if self.life <= 0:
+            self.alive = False
+
+        # Ignore wall collision until bullet moved out a bit from its source wall
+        if self.alive and self.dist_traveled > self.grace_dist:
+            gx,gy=int(self.x//TILE), int(self.y//TILE)
+            if world.is_solid(gx,gy):
+                self.alive=False
+
     def draw(self,surf):
         if self.alive:
-            pygame.draw.circle(surf, YELLOW, (int(self.x),int(self.y)), 3)
+            pygame.draw.circle(surf, self.color, (int(self.x),int(self.y)), 3)
 
 class Enemy:
     def __init__(self,grid_pos, tier=1):
         self.gx,self.gy = grid_pos
         self.x,self.y = self.gx*TILE+TILE/2, self.gy*TILE+TILE/2
+        self.base_speed = 1.2 + 0.2*tier
         self.hp = 2 + tier
-        self.speed = 1.2 + 0.2*tier
         self.damage = 4 + 2*tier
         self.tier=tier
         self.path_timer=0
         self.next_cell=(self.gx,self.gy)
         self.alive=True
         self.hit_timer=0
+        # Status effects
+        self.dots=[]   # list of dicts: {"dps":.., "t":..}
+        self.slows=[]  # list of dicts: {"factor":.., "t":..}
     def grid_cell(self): return int(self.x//TILE), int(self.y//TILE)
+
+    def apply_dot(self, dps, duration):
+        if dps<=0 or duration<=0: return
+        self.dots.append({"dps":dps, "t":duration})
+
+    def apply_slow(self, factor, duration):
+        if duration<=0 or factor>=1.0: return
+        self.slows.append({"factor":max(0.1, factor), "t":duration})
+
+    def _tick_status(self, dt):
+        # DoT
+        total_dps=0.0
+        for s in self.dots:
+            total_dps+=s["dps"]
+            s["t"]-=dt
+        self.dots=[s for s in self.dots if s["t"]>0]
+        if total_dps>0:
+            self.hp -= total_dps*dt
+            self.hit_timer=0.05
+        # Slow
+        for s in self.slows:
+            s["t"]-=dt
+        self.slows=[s for s in self.slows if s["t"]>0]
+
+    def current_speed(self):
+        slow_factor = 1.0
+        if self.slows:
+            slow_factor = min(s["factor"] for s in self.slows)
+        return self.base_speed * slow_factor
+
     def update(self,dt,world):
         if not self.alive: return
+        self._tick_status(dt)
         self.hit_timer=max(0, self.hit_timer-dt)
         self.path_timer-=dt
         target = world.base_cell
@@ -119,8 +172,8 @@ class Enemy:
         nx,ny = self.next_cell
         tx,ty = nx*TILE+TILE/2, ny*TILE+TILE/2
         ang = math.atan2(ty-self.y, tx-self.x)
-        self.x += math.cos(ang)*self.speed*60*dt
-        self.y += math.sin(ang)*self.speed*60*dt
+        self.x += math.cos(ang)*self.current_speed()*60*dt
+        self.y += math.sin(ang)*self.current_speed()*60*dt
         if world.is_solid(int(self.x//TILE), int(self.y//TILE)):
             self.x=self.gx*TILE+TILE/2; self.y=self.gy*TILE+TILE/2
         else:
@@ -130,6 +183,8 @@ class Enemy:
     def draw(self,surf):
         c = (200,60,60) if self.hit_timer<=0 else (255,200,200)
         pygame.draw.circle(surf, c, (int(self.x),int(self.y)), 10+self.tier)
+        if self.slows:
+            pygame.draw.circle(surf, CYAN, (int(self.x),int(self.y)), 12+self.tier,1)
 
 class Pickup:
     def __init__(self,pos,kind="scrap",amount=1):
@@ -146,24 +201,57 @@ class Pickup:
         pygame.draw.circle(surf, color, (int(self.x),int(self.y)), r)
         pygame.draw.circle(surf, WHITE, (int(self.x),int(self.y)), r,1)
 
+# ----------------------------
+# Turrets
+# ----------------------------
+TURRET_KINDS = {
+    "basic": {
+        "color": PURPLE, "rate": 0.7, "range": 220, "proj_speed": 420,
+        "damage": 1.0, "dot_dps": 0.0, "dot_dur": 0.0, "slow_factor": 1.0, "slow_dur": 0.0, "bullet_color": YELLOW
+    },
+    "flame": {
+        "color": ORANGE, "rate": 0.45, "range": 180, "proj_speed": 360,
+        "damage": 0.5, "dot_dps": 2.0, "dot_dur": 1.3, "slow_factor": 1.0, "slow_dur": 0.0, "bullet_color": ORANGE
+    },
+    "ice": {
+        "color": CYAN, "rate": 0.9, "range": 240, "proj_speed": 400,
+        "damage": 0.6, "dot_dps": 0.0, "dot_dur": 0.0, "slow_factor": 0.55, "slow_dur": 1.6, "bullet_color": CYAN
+    }
+}
+
 class Turret:
-    def __init__(self,cell):
+    def __init__(self,cell,turret_type="basic"):
         self.cell=cell
         self.x,self.y=cell[0]*TILE+TILE/2, cell[1]*TILE+TILE/2
+        self.type = turret_type if turret_type in TURRET_KINDS else "basic"
+        cfg = TURRET_KINDS[self.type]
         self.cooldown=0
-        self.rate=0.7
-        self.range=220
+        self.rate=cfg["rate"]
+        self.range=cfg["range"]
+        self.proj_speed=cfg["proj_speed"]
+        self.damage=cfg["damage"]
+        self.dot_dps=cfg["dot_dps"]; self.dot_dur=cfg["dot_dur"]
+        self.slow_factor=cfg["slow_factor"]; self.slow_dur=cfg["slow_dur"]
+        self.color=cfg["color"]; self.bullet_color = cfg["bullet_color"]
     def update(self,dt,world):
         self.cooldown=max(0,self.cooldown-dt)
         if self.cooldown==0 and world.enemies:
             target=min(world.enemies, key=lambda e: dist((self.x,self.y),(e.x,e.y)))
             if dist((self.x,self.y),(target.x,target.y))<self.range:
                 ang=math.atan2(target.y-self.y, target.x-self.x)
-                speed=420
-                world.bullets.append(Bullet((self.x,self.y),(math.cos(ang)*speed, math.sin(ang)*speed),damage=1))
+                vx,vy = math.cos(ang)*self.proj_speed, math.sin(ang)*self.proj_speed
+                world.bullets.append(
+                    Bullet(
+                        (self.x,self.y),(vx,vy),
+                        damage=self.damage, life=1.5,
+                        dot_dps=self.dot_dps, dot_dur=self.dot_dur,
+                        slow_factor=self.slow_factor, slow_dur=self.slow_dur,
+                        color=self.bullet_color
+                    )
+                )
                 self.cooldown=self.rate
     def draw(self,surf):
-        pygame.draw.circle(surf, PURPLE,(int(self.x),int(self.y)), 10)
+        pygame.draw.circle(surf, self.color,(int(self.x),int(self.y)), 10)
         pygame.draw.circle(surf, WHITE,(int(self.x),int(self.y)), 10,1)
 
 # ----------------------------
@@ -196,10 +284,14 @@ class World:
         return True
     def can_place_turret(self, cell):
         gx,gy = cell
-        if not (0<=gx<GRID_W and 0<=gy<GRID_H): return False
-        if self.grid[gx][gy]==1: return False  # must be floor
+        if not (0<=gx<GRID_W and 0<=gy<GRID_H):
+            return False
+        # NEW: place on WALLS (must be solid)
+        if self.grid[gx][gy] == 0:
+            return False
         for t in self.turrets:
-            if t.cell == cell: return False
+            if t.cell == cell:
+                return False
         return True
     def update(self,dt):
         self.message_timer=max(0,self.message_timer-dt)
@@ -217,7 +309,9 @@ class World:
             if b.alive:
                 for e in self.enemies:
                     if dist((b.x,b.y),(e.x,e.y))<12+e.tier and e.alive:
-                        e.hp-=self.player.attack_damage
+                        e.hp -= b.damage
+                        if b.dot_dps>0: e.apply_dot(b.dot_dps, b.dot_dur)
+                        if b.slow_factor<1.0: e.apply_slow(b.slow_factor, b.slow_dur)
                         e.hit_timer=0.1
                         b.alive=False
                         break
@@ -225,7 +319,7 @@ class World:
                 self.bullets.remove(b)
         for p in list(self.pickups):
             p.update(dt,self)
-            if dist((self.player.x,self.player.y),(p.x,p.y))<14 and len(self.player.backpack)<self.player.backpack_capacity:
+            if dist((self.player.x,self.player.y),(p.x,p.y))<14 and self.player.backpack_space():
                 self.player.backpack.append(p)
                 self.pickups.remove(p)
         for t in self.turrets: t.update(dt,self)
@@ -277,12 +371,12 @@ class World:
             p.scrap-=6; p.max_hp+=10; p.hp=p.max_hp; self.say("HP +10")
         elif item=="capacity" and p.scrap>=8:
             p.scrap-=8; p.backpack_capacity+=3; self.say("Backpack +3")
-        elif item=="turret" and p.cores>=3:
-            # NEW: give a turret kit instead of placing immediately
-            p.cores-=3
-            p.turret_kits += 1
-            p.placing_turret = True
-            self.say("Turret kit acquired: click a floor tile to place")
+        elif item=="turret_basic" and p.cores>=3:
+            p.cores-=3; p.add_turret_kit("basic"); self.say("Basic turret kit acquired")
+        elif item=="turret_flame" and p.cores>=4:
+            p.cores-=4; p.add_turret_kit("flame"); self.say("Flame turret kit acquired")
+        elif item=="turret_ice" and p.cores>=4:
+            p.cores-=4; p.add_turret_kit("ice"); self.say("Ice turret kit acquired")
         elif item=="basehp" and p.cores>=2:
             p.cores-=2; self.base_hp=min(200, self.base_hp+30); self.say("Base repaired +30")
         else:
@@ -305,7 +399,6 @@ class World:
         for e in self.enemies: e.draw(screen)
         for b in self.bullets: b.draw(screen)
         self.player.draw(screen)
-        # NEW: ghost turret preview while placing
         self.draw_turret_preview(screen)
         self.draw_darkness(screen)
         self.draw_ui(screen)
@@ -317,9 +410,15 @@ class World:
         gx, gy = int(wx//TILE), int(wy//TILE)
         cx, cy = gx*TILE + TILE//2 - self.camera[0], gy*TILE + TILE//2 - self.camera[1]
         valid = self.can_place_turret((gx,gy))
-        col = (120,220,140) if valid else (220,120,120)
+        ttype = self.player.placing_type or "basic"
+        col = TURRET_KINDS[ttype]["color"]
+        if not valid:
+            col = (max(0,col[0]-80), max(0,col[1]-80), max(0,col[2]-80))
         pygame.draw.circle(screen, col, (int(cx),int(cy)), 12, 2)
-        pygame.draw.circle(screen, (255,255,255), (int(cx),int(cy)), 12, 1)
+        pygame.draw.circle(screen, WHITE, (int(cx),int(cy)), 12, 1)
+        # range ring
+        rng = TURRET_KINDS[ttype]["range"]
+        pygame.draw.circle(screen, (200,200,220), (int(cx),int(cy)), rng, 1)
     def draw_darkness(self,screen):
         dark = pygame.Surface((WIDTH,HEIGHT), pygame.SRCALPHA)
         px,py = int(self.player.x-self.camera[0]), int(self.player.y-self.camera[1])
@@ -331,7 +430,9 @@ class World:
     def draw_ui(self,screen):
         font=pygame.font.SysFont("consolas",18)
         big=pygame.font.SysFont("consolas",24, bold=True)
-        text=f"HP {int(self.player.hp)}/{int(self.player.max_hp)}  Scrap:{self.player.scrap}  Cores:{self.player.cores}  Kits:{self.player.turret_kits}  Backpack:{len(self.player.backpack)}/{self.player.backpack_capacity}  Wave:{self.wave-1}  BaseHP:{int(self.base_hp)}"
+        kits = self.player.turret_kits
+        kits_text = f"B:{kits.get('basic',0)} F:{kits.get('flame',0)} I:{kits.get('ice',0)}"
+        text=f"HP {int(self.player.hp)}/{int(self.player.max_hp)}  Scrap:{self.player.scrap}  Cores:{self.player.cores}  Kits[{kits_text}]  Backpack:{len(self.player.backpack)}/{self.player.backpack_capacity}  Wave:{self.wave-1}  BaseHP:{int(self.base_hp)}"
         screen.blit(font.render(text,True,WHITE),(10,10))
         if self.message_timer>0:
             msgsurf=big.render(self.message,True,YELLOW)
@@ -342,11 +443,14 @@ class World:
             over=big.render("BASE DESTROYED! Press R to restart.",True,RED)
             screen.blit(over,(WIDTH//2-over.get_width()//2, HEIGHT//2-20))
         if self.player.placing_turret:
-            tip = font.render("Placing turret: Left-click to place • Right-click/Esc to cancel", True, (220,220,240))
+            tip = font.render(
+                f"Placing [{self.player.placing_type}] on WALLS: Left-click place • Right-click/Esc cancel • [Tab] cycle",
+                True, (220,220,240)
+            )
             screen.blit(tip, (WIDTH//2 - tip.get_width()//2, HEIGHT-30))
     def draw_shop(self,screen):
         font=pygame.font.SysFont("consolas",18)
-        panel=pygame.Surface((380,260))
+        panel=pygame.Surface((420,320))
         panel.fill((16,22,30))
         pygame.draw.rect(panel,(80,120,160),panel.get_rect(),2)
         lines=[
@@ -355,14 +459,16 @@ class World:
             "2) +0.5 Damage .......... 7 scrap",
             "3) +10 HP ............... 6 scrap",
             "4) +3 Backpack Capacity . 8 scrap",
-            "5) Install Turret ....... 3 cores",
+            "5) Basic Turret ......... 3 cores",
             "6) Repair Base +30 ...... 2 cores",
+            "7) Flame Turret (DoT) ... 4 cores",
+            "8) Ice Turret (Slow) .... 4 cores",
             "",
-            "Press [1-6] to buy."
+            "Press [1-8] to buy."
         ]
         for i,l in enumerate(lines):
             panel.blit(font.render(l,True,WHITE),(12,12+i*24))
-        screen.blit(panel,(WIDTH-400, HEIGHT-280))
+        screen.blit(panel,(WIDTH-440, HEIGHT-340))
     def draw_pause_menu(self,screen):
         overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
         overlay.fill((0, 0, 0, 160))
@@ -397,9 +503,25 @@ class Player:
         self.in_shop=False
         self.shoot_cooldown=0
         self.flashlight_level=1
-        # NEW: turret placement
-        self.turret_kits = 0
+        # turret kits & placement
+        self.turret_kits = {"basic":0, "flame":0, "ice":0}
         self.placing_turret = False
+        self.placing_type = None
+    def backpack_space(self):
+        return len(self.backpack) < self.backpack_capacity
+    def add_turret_kit(self, ttype):
+        if ttype not in self.turret_kits: self.turret_kits[ttype]=0
+        self.turret_kits[ttype]+=1
+        # enter placement for that type immediately
+        self.placing_turret = True
+        self.placing_type = ttype
+    def cycle_turret_type(self):
+        types = [t for t,c in self.turret_kits.items() if c>0]
+        if not types: return
+        if self.placing_type not in types:
+            self.placing_type = types[0]; return
+        idx = types.index(self.placing_type)
+        self.placing_type = types[(idx+1)%len(types)]
     def update(self,dt):
         keys=pygame.key.get_pressed()
         mx,my = pygame.mouse.get_pos()
@@ -415,7 +537,9 @@ class Player:
             wy = my + self.world.camera[1]
             ang=math.atan2(wy-py, wx-px)
             speed=520
-            self.world.bullets.append(Bullet((px,py),(math.cos(ang)*speed, math.sin(ang)*speed),damage=self.attack_damage))
+            self.world.bullets.append(
+                Bullet((px,py),(math.cos(ang)*speed, math.sin(ang)*speed),damage=self.attack_damage, color=YELLOW)
+            )
             self.shoot_cooldown=0.2
         for e in list(self.world.enemies):
             if dist((self.x,self.y),(e.x,e.y))<14+e.tier:
@@ -480,7 +604,7 @@ def draw_main_menu(surface, items, hovered_index):
 
 def draw_help(surface):
     draw_title(surface, "HOW TO PLAY")
-    panel = pygame.Surface((680, 320))
+    panel = pygame.Surface((680, 360))
     panel.fill((16,22,30))
     pygame.draw.rect(panel, (80,120,160), panel.get_rect(), 2)
     font=pygame.font.SysFont("consolas",20)
@@ -488,9 +612,9 @@ def draw_help(surface):
         "WASD or Arrow Keys to move",
         "Mouse to aim and Left Click to shoot",
         "[E] deposit on base, [B] shop on base",
-        "[1-6] buy in shop, [R] restart",
+        "[1-8] buy in shop, [R] restart",
         "[Esc] or [P] pause",
-        "T to enter turret placement if you have kits",
+        "T to enter turret placement (Tab to cycle type)",
         "",
         "Protect the base in the center. Collect scrap and cores.",
         "Spend scrap/cores in the shop to upgrade and survive waves."
@@ -522,10 +646,10 @@ def main():
     help_lines=[
         "WASD to move, Mouse to aim/shoot",
         "[E] deposit on base, [B] shop on base",
-        "[1-6] buy in shop, [R] restart, [Esc] close shop",
-        "T to place a turret kit"
+        "[1-8] buy in shop, [R] restart, [Esc] close shop",
+        "T to place a turret kit (Tab to cycle)"
     ]
-    helpsurf=pygame.Surface((460,100))
+    helpsurf=pygame.Surface((520,120))
     helpsurf.fill((16,22,30))
     pygame.draw.rect(helpsurf,(80,120,160),helpsurf.get_rect(),2)
     for i,l in enumerate(help_lines):
@@ -568,7 +692,7 @@ def main():
                     # Esc / P: close shop OR cancel placement OR pause/resume
                     if ev.key in (pygame.K_ESCAPE, pygame.K_p):
                         if world.player.in_shop:
-                            world.player.in_shop = False                     # <-- close shop
+                            world.player.in_shop = False
                         elif ev.key == pygame.K_ESCAPE and world.player.placing_turret:
                             world.player.placing_turret = False
                             world.say("Turret placement cancelled")
@@ -584,7 +708,8 @@ def main():
                             # Cheat Key
                             world.player.scrap+=10
                             world.player.cores+=10
-                            world.player.turret_kits+=10
+                            for k in world.player.turret_kits:
+                                world.player.turret_kits[k]+=2
 
                         elif ev.key == pygame.K_b:
                             # Toggle shop when on the base
@@ -597,21 +722,28 @@ def main():
                             world.deposit()
 
                         elif ev.key == pygame.K_t:
-                            if world.player.turret_kits > 0:
+                            avail = [t for t,c in world.player.turret_kits.items() if c>0]
+                            if avail:
                                 world.player.placing_turret = True
+                                if world.player.placing_type not in avail:
+                                    world.player.placing_type = avail[0]
                                 world.say("Turret placement mode")
                             else:
                                 world.say("No turret kits")
 
+                        elif ev.key == pygame.K_TAB and world.player.placing_turret:
+                            world.player.cycle_turret_type()
+
                         elif world.player.in_shop and ev.key in (
-                            pygame.K_1, pygame.K_2, pygame.K_3, pygame.K_4, pygame.K_5, pygame.K_6
+                            pygame.K_1, pygame.K_2, pygame.K_3, pygame.K_4,
+                            pygame.K_5, pygame.K_6, pygame.K_7, pygame.K_8
                         ):
                             idx = {
                                 pygame.K_1:"speed", pygame.K_2:"damage", pygame.K_3:"hp",
-                                pygame.K_4:"capacity", pygame.K_5:"turret", pygame.K_6:"basehp"
+                                pygame.K_4:"capacity", pygame.K_5:"turret_basic", pygame.K_6:"basehp",
+                                pygame.K_7:"turret_flame", pygame.K_8:"turret_ice"
                             }[ev.key]
                             world.buy(idx)
-
 
                 elif game_state == "paused":
                     if ev.key in (pygame.K_p, pygame.K_ESCAPE):
@@ -666,11 +798,17 @@ def main():
                             wx = mx + world.camera[0]
                             wy = my + world.camera[1]
                             gx, gy = int(wx//TILE), int(wy//TILE)
-                            if world.can_place_turret((gx,gy)):
-                                world.turrets.append(Turret((gx,gy)))
-                                world.player.turret_kits -= 1
-                                world.player.placing_turret = (world.player.turret_kits>0)
-                                world.say("Turret placed")
+                            if world.can_place_turret((gx,gy)) and world.player.placing_type:
+                                world.turrets.append(Turret((gx,gy), world.player.placing_type))
+                                ttype = world.player.placing_type
+                                world.player.turret_kits[ttype] -= 1
+                                if world.player.turret_kits[ttype] <= 0:
+                                    avail = [t for t,c in world.player.turret_kits.items() if c>0]
+                                    if avail:
+                                        world.player.placing_type = avail[0]
+                                    else:
+                                        world.player.placing_turret = False
+                                world.say(f"{ttype.capitalize()} turret placed")
                             else:
                                 world.say("Can't place there")
                         elif ev.button == 3:  # right click: cancel
