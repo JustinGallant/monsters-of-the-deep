@@ -427,7 +427,9 @@ class World:
         self.pickups=[]
         self.bullets=[]
         self.turrets=[]
-        self.spawn_timer=3
+        self.active_wave = False
+        self.waiting_next_wave = True # start in "waiting" state
+        self.say("Press [N] to start Wave 1", 3.0)
         self.wave=1
         self.base_hp=100.0
         self.camera=(0,0)
@@ -513,28 +515,37 @@ class World:
                 self.pickups.remove(p)
         for t in self.turrets: t.update(dt,self)
 
-        self.spawn_timer-=dt
-        if self.spawn_timer<=0:
-            self.spawn_wave()
-            self.spawn_timer = max(2.0, 8 - self.wave*0.5)
+        if self.active_wave and not self.enemies:
+            self.active_wave = False
+            self.waiting_next_wave = True
+            self.say(f"Wave {self.wave-1} cleared! Press [N] when ready.", 3.0)
 
-        self.camera=(int(self.player.x-WIDTH//2), int(self.player.y-HEIGHT//2))
-        self.camera=(clamp(self.camera[0],0,GRID_W*TILE-WIDTH), clamp(self.camera[1],0,GRID_H*TILE-HEIGHT))
+        self.camera = (int(self.player.x - WIDTH//2), int(self.player.y - HEIGHT//2))
+        self.camera = (clamp(self.camera[0], 0, GRID_W*TILE - WIDTH), clamp(self.camera[1], 0, GRID_H*TILE - HEIGHT))
+
+    def start_next_wave(self):
+        if self.waiting_next_wave and self.base_hp > 0:
+            self.spawn_wave()
 
     def spawn_wave(self):
-        count= min(3+self.wave, 18)
+        # spawn enemies for current self.wave, then advance wave counter
+        count = min(3 + self.wave, 18)
         for _ in range(count):
             for _tries in range(100):
                 x = random.choice([1, GRID_W-2])
-                y = random.randrange(1,GRID_H-1)
-                if random.random()<0.5:
-                    x = random.randrange(1,GRID_W-1)
+                y = random.randrange(1, GRID_H-1)
+                if random.random() < 0.5:
+                    x = random.randrange(1, GRID_W-1)
                     y = random.choice([1, GRID_H-2])
-                if self.grid[x][y]==0:
-                    self.enemies.append(Enemy((x,y), tier=1 + self.wave//4))
+                if self.grid[x][y] == 0:
+                    self.enemies.append(Enemy((x, y), tier=1 + self.wave // 4))
                     break
+
+        # move to active wave state
+        self.active_wave = True
+        self.waiting_next_wave = False
+        self.say(f"Wave {self.wave}!", 1.8)
         self.wave += 1
-        self.say(f"Wave {self.wave-1}!")
 
     def deposit(self):
         if dist((self.player.x,self.player.y),(self.base_cell[0]*TILE+TILE/2, self.base_cell[1]*TILE+TILE/2))<self.deposit_radius:
@@ -651,7 +662,7 @@ class World:
         screen.blit(font.render(text,True,WHITE),(10,10))
         if self.message_timer>0:
             msgsurf=big.render(self.message,True,YELLOW)
-            screen.blit(msgsurf,(WIDTH//2-msgsurf.get_width()//2,10))
+            screen.blit(msgsurf,(WIDTH//2-msgsurf.get_width()//2,30))
         if self.player.in_shop:
             self.draw_shop(screen)
         if self.base_hp<=0:
@@ -665,6 +676,10 @@ class World:
             screen.blit(tip, (WIDTH//2 - tip.get_width()//2, HEIGHT-30))
         if self.upgrade_target:
             self.draw_upgrade_panel(screen)
+        if self.waiting_next_wave and self.base_hp > 0 and not self.player.in_shop and (self.upgrade_target is None):
+            hint_font = pygame.font.SysFont("consolas", 20, bold=True)
+            hint = hint_font.render("Press [N] to start the next wave", True, (220, 220, 240))
+            screen.blit(hint, (WIDTH//2 - hint.get_width()//2, HEIGHT - 48))
 
     def draw_shop(self,screen):
         font=pygame.font.SysFont("consolas",18)
@@ -942,6 +957,7 @@ def main():
                     elif ev.key in (pygame.K_ESCAPE,):
                         running = False
 
+
                 elif game_state == "help":
                     if ev.key in (pygame.K_ESCAPE, pygame.K_RETURN, pygame.K_SPACE):
                         game_state = "menu"
@@ -960,6 +976,12 @@ def main():
                         else:
                             paused = not paused
                             game_state = "paused" if paused else "playing"
+
+                    elif ev.key == pygame.K_n and (not world.player.in_shop) and (world.upgrade_target is None) and world.base_hp > 0:
+                        if world.waiting_next_wave:
+                            world.start_next_wave()
+                        else:
+                            world.say("Current wave still in progress")
 
                     elif not paused:
                         if ev.key == pygame.K_r:
