@@ -24,7 +24,6 @@ def dist(a,b): return math.hypot(a[0]-b[0], a[1]-b[1])
 # Maze generation (DFS)
 # ----------------------------
 def generate_maze(w, h):
-    # grid: 1 = wall, 0 = floor
     grid = [[1 for _ in range(h)] for _ in range(w)]
     start = (1,1)
     stack=[start]
@@ -44,7 +43,6 @@ def generate_maze(w, h):
                 break
         if not carved:
             stack.pop()
-    # open some extra loops
     for _ in range((w*h)//40):
         x = random.randrange(1,w-1)
         y = random.randrange(1,h-1)
@@ -71,7 +69,6 @@ def bfs_next_step(grid, start, goal):
                 q.append((nx,ny))
     if (gx,gy) not in came:
         return start
-    # backtrack one step from goal
     cur=(gx,gy)
     while came[cur] and came[cur]!=start:
         cur=came[cur]
@@ -92,7 +89,6 @@ class Bullet:
         self.x+=self.vx*dt; self.y+=self.vy*dt
         self.life-=dt
         if self.life<=0: self.alive=False
-        # collide walls
         gx,gy=int(self.x//TILE), int(self.y//TILE)
         if world.is_solid(gx,gy): self.alive=False
     def draw(self,surf):
@@ -125,12 +121,10 @@ class Enemy:
         ang = math.atan2(ty-self.y, tx-self.x)
         self.x += math.cos(ang)*self.speed*60*dt
         self.y += math.sin(ang)*self.speed*60*dt
-        # clamp in corridors
         if world.is_solid(int(self.x//TILE), int(self.y//TILE)):
             self.x=self.gx*TILE+TILE/2; self.y=self.gy*TILE+TILE/2
         else:
             self.gx,self.gy=int(self.x//TILE), int(self.y//TILE)
-        # reached base?
         if (self.gx,self.gy)==world.base_cell:
             world.base_hp = max(0, world.base_hp - self.damage*dt)
     def draw(self,surf):
@@ -162,7 +156,6 @@ class Turret:
     def update(self,dt,world):
         self.cooldown=max(0,self.cooldown-dt)
         if self.cooldown==0 and world.enemies:
-            # target closest
             target=min(world.enemies, key=lambda e: dist((self.x,self.y),(e.x,e.y)))
             if dist((self.x,self.y),(target.x,target.y))<self.range:
                 ang=math.atan2(target.y-self.y, target.x-self.x)
@@ -179,7 +172,6 @@ class Turret:
 class World:
     def __init__(self):
         self.grid = generate_maze(GRID_W, GRID_H)
-        # carve a central room as base/shop
         self.base_cell=(GRID_W//2, GRID_H//2)
         for x in range(self.base_cell[0]-2, self.base_cell[0]+3):
             for y in range(self.base_cell[1]-2, self.base_cell[1]+3):
@@ -202,6 +194,13 @@ class World:
         if 0<=gx<GRID_W and 0<=gy<GRID_H:
             return self.grid[gx][gy]==1
         return True
+    def can_place_turret(self, cell):
+        gx,gy = cell
+        if not (0<=gx<GRID_W and 0<=gy<GRID_H): return False
+        if self.grid[gx][gy]==1: return False  # must be floor
+        for t in self.turrets:
+            if t.cell == cell: return False
+        return True
     def update(self,dt):
         self.message_timer=max(0,self.message_timer-dt)
         self.player.update(dt)
@@ -209,14 +208,12 @@ class World:
             e.update(dt,self)
             if e.hp<=0:
                 self.enemies.remove(e)
-                # drop loot
                 if random.random()<0.85:
                     self.pickups.append(Pickup((e.x,e.y),"scrap", amount=1))
                 if random.random()<0.18:
                     self.pickups.append(Pickup((e.x,e.y),"core", amount=1))
         for b in list(self.bullets):
             b.update(dt,self)
-            # bullet vs enemy
             if b.alive:
                 for e in self.enemies:
                     if dist((b.x,b.y),(e.x,e.y))<12+e.tier and e.alive:
@@ -232,18 +229,15 @@ class World:
                 self.player.backpack.append(p)
                 self.pickups.remove(p)
         for t in self.turrets: t.update(dt,self)
-        # enemy spawn logic
         self.spawn_timer-=dt
         if self.spawn_timer<=0:
             self.spawn_wave()
             self.spawn_timer = max(2.0, 8 - self.wave*0.5)
-        # camera follows player
         self.camera=(int(self.player.x-WIDTH//2), int(self.player.y-HEIGHT//2))
         self.camera=(clamp(self.camera[0],0,GRID_W*TILE-WIDTH), clamp(self.camera[1],0,GRID_H*TILE-HEIGHT))
     def spawn_wave(self):
         count= min(3+self.wave, 18)
         for _ in range(count):
-            # pick random edge cell that is floor
             for _tries in range(100):
                 x = random.choice([1, GRID_W-2])
                 y = random.randrange(1,GRID_H-1)
@@ -256,7 +250,6 @@ class World:
         self.wave += 1
         self.say(f"Wave {self.wave-1}!")
     def deposit(self):
-        # convert pickups in backpack into currencies
         if dist((self.player.x,self.player.y),(self.base_cell[0]*TILE+TILE/2, self.base_cell[1]*TILE+TILE/2))<self.deposit_radius:
             scrap= sum(1 for p in self.player.backpack if p.kind=="scrap")
             cores= sum(1 for p in self.player.backpack if p.kind=="core")
@@ -285,15 +278,17 @@ class World:
         elif item=="capacity" and p.scrap>=8:
             p.scrap-=8; p.backpack_capacity+=3; self.say("Backpack +3")
         elif item=="turret" and p.cores>=3:
-            p.cores-=3; self.turrets.append(Turret(self.base_cell)); self.say("Turret installed")
+            # NEW: give a turret kit instead of placing immediately
+            p.cores-=3
+            p.turret_kits += 1
+            p.placing_turret = True
+            self.say("Turret kit acquired: click a floor tile to place")
         elif item=="basehp" and p.cores>=2:
             p.cores-=2; self.base_hp=min(200, self.base_hp+30); self.say("Base repaired +30")
         else:
             self.say("Not enough currency")
     def draw(self,screen):
-        # world to screen offset
         ox,oy = -self.camera[0], -self.camera[1]
-        # draw floor
         screen.fill((10,10,15))
         for x in range(GRID_W):
             for y in range(GRID_H):
@@ -302,7 +297,6 @@ class World:
                     pygame.draw.rect(screen, GREY, rect)
                 else:
                     pygame.draw.rect(screen, (20,20,26), rect,1)
-        # base area
         bx,by=self.base_cell[0]*TILE+TILE/2+ox, self.base_cell[1]*TILE+TILE/2+oy
         pygame.draw.circle(screen, (40,60,80), (int(bx),int(by)), self.deposit_radius)
         pygame.draw.circle(screen, (120,140,200), (int(bx),int(by)), self.deposit_radius,2)
@@ -311,8 +305,21 @@ class World:
         for e in self.enemies: e.draw(screen)
         for b in self.bullets: b.draw(screen)
         self.player.draw(screen)
+        # NEW: ghost turret preview while placing
+        self.draw_turret_preview(screen)
         self.draw_darkness(screen)
         self.draw_ui(screen)
+    def draw_turret_preview(self, screen):
+        if not self.player.placing_turret: return
+        mx, my = pygame.mouse.get_pos()
+        wx = mx + self.camera[0]
+        wy = my + self.camera[1]
+        gx, gy = int(wx//TILE), int(wy//TILE)
+        cx, cy = gx*TILE + TILE//2 - self.camera[0], gy*TILE + TILE//2 - self.camera[1]
+        valid = self.can_place_turret((gx,gy))
+        col = (120,220,140) if valid else (220,120,120)
+        pygame.draw.circle(screen, col, (int(cx),int(cy)), 12, 2)
+        pygame.draw.circle(screen, (255,255,255), (int(cx),int(cy)), 12, 1)
     def draw_darkness(self,screen):
         dark = pygame.Surface((WIDTH,HEIGHT), pygame.SRCALPHA)
         px,py = int(self.player.x-self.camera[0]), int(self.player.y-self.camera[1])
@@ -324,7 +331,7 @@ class World:
     def draw_ui(self,screen):
         font=pygame.font.SysFont("consolas",18)
         big=pygame.font.SysFont("consolas",24, bold=True)
-        text=f"HP {int(self.player.hp)}/{int(self.player.max_hp)}  Scrap:{self.player.scrap}  Cores:{self.player.cores}  Backpack:{len(self.player.backpack)}/{self.player.backpack_capacity}  Wave:{self.wave-1}  BaseHP:{int(self.base_hp)}"
+        text=f"HP {int(self.player.hp)}/{int(self.player.max_hp)}  Scrap:{self.player.scrap}  Cores:{self.player.cores}  Kits:{self.player.turret_kits}  Backpack:{len(self.player.backpack)}/{self.player.backpack_capacity}  Wave:{self.wave-1}  BaseHP:{int(self.base_hp)}"
         screen.blit(font.render(text,True,WHITE),(10,10))
         if self.message_timer>0:
             msgsurf=big.render(self.message,True,YELLOW)
@@ -334,6 +341,9 @@ class World:
         if self.base_hp<=0:
             over=big.render("BASE DESTROYED! Press R to restart.",True,RED)
             screen.blit(over,(WIDTH//2-over.get_width()//2, HEIGHT//2-20))
+        if self.player.placing_turret:
+            tip = font.render("Placing turret: Left-click to place • Right-click/Esc to cancel", True, (220,220,240))
+            screen.blit(tip, (WIDTH//2 - tip.get_width()//2, HEIGHT-30))
     def draw_shop(self,screen):
         font=pygame.font.SysFont("consolas",18)
         panel=pygame.Surface((380,260))
@@ -353,22 +363,17 @@ class World:
         for i,l in enumerate(lines):
             panel.blit(font.render(l,True,WHITE),(12,12+i*24))
         screen.blit(panel,(WIDTH-400, HEIGHT-280))
-
-    # --- NEW: pause menu with clickable buttons ---
     def draw_pause_menu(self,screen):
         overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
         overlay.fill((0, 0, 0, 160))
         screen.blit(overlay, (0, 0))
-
         title_font = pygame.font.SysFont("consolas", 36, bold=True)
         title = title_font.render("PAUSED", True, (255, 255, 255))
-        screen.blit(title, (WIDTH//2 - title.get_width()//2, HEIGHT//2 - 160))
-
-        # buttons
-        labels = ["Resume", "Main Menu", "Restart", "Quit"]
+        screen.blit(title, (WIDTH//2 - title.get_width()//2, HEIGHT//2 - 200))
+        labels = ["Resume", "Restart", "Main Menu", "Quit"]
         btn_w, btn_h = 320, 56
         spacing = 72
-        start_y = HEIGHT//2 - 60
+        start_y = HEIGHT//2 - 80
         mx,my = pygame.mouse.get_pos()
         rects = []
         for i, label in enumerate(labels):
@@ -392,6 +397,9 @@ class Player:
         self.in_shop=False
         self.shoot_cooldown=0
         self.flashlight_level=1
+        # NEW: turret placement
+        self.turret_kits = 0
+        self.placing_turret = False
     def update(self,dt):
         keys=pygame.key.get_pressed()
         mx,my = pygame.mouse.get_pos()
@@ -401,7 +409,7 @@ class Player:
         vx,vy = dx/length*self.speed*120*dt, dy/length*self.speed*120*dt
         self.move(vx,vy)
         self.shoot_cooldown=max(0,self.shoot_cooldown-dt)
-        if pygame.mouse.get_pressed()[0] and self.shoot_cooldown==0 and self.world.base_hp>0 and not self.in_shop:
+        if pygame.mouse.get_pressed()[0] and self.shoot_cooldown==0 and self.world.base_hp>0 and not self.in_shop and not self.placing_turret:
             px,py=self.x,self.y
             wx = mx + self.world.camera[0]
             wy = my + self.world.camera[1]
@@ -482,6 +490,7 @@ def draw_help(surface):
         "[E] deposit on base, [B] shop on base",
         "[1-6] buy in shop, [R] restart",
         "[Esc] or [P] pause",
+        "T to enter turret placement if you have kits",
         "",
         "Protect the base in the center. Collect scrap and cores.",
         "Spend scrap/cores in the shop to upgrade and survive waves."
@@ -489,7 +498,6 @@ def draw_help(surface):
     for i,l in enumerate(lines):
         panel.blit(font.render(l, True, WHITE), (16, 16 + i*32))
     surface.blit(panel, (WIDTH//2 - panel.get_width()//2, 230))
-
     rect = pygame.Rect(WIDTH//2 - 140, HEIGHT - 100, 280, 52)
     mx,my = pygame.mouse.get_pos()
     draw_button(surface, rect, "Back", rect.collidepoint(mx,my))
@@ -515,8 +523,9 @@ def main():
         "WASD to move, Mouse to aim/shoot",
         "[E] deposit on base, [B] shop on base",
         "[1-6] buy in shop, [R] restart, [Esc] close shop",
+        "T to place a turret kit"
     ]
-    helpsurf=pygame.Surface((420,80))
+    helpsurf=pygame.Surface((460,100))
     helpsurf.fill((16,22,30))
     pygame.draw.rect(helpsurf,(80,120,160),helpsurf.get_rect(),2)
     for i,l in enumerate(help_lines):
@@ -556,19 +565,44 @@ def main():
                         game_state = "menu"
 
                 elif game_state == "playing":
-                    if ev.key in (pygame.K_p, pygame.K_ESCAPE):
+                    # Esc / P: close shop OR cancel placement OR pause/resume
+                    if ev.key in (pygame.K_ESCAPE, pygame.K_p):
                         if world.player.in_shop:
-                            world.player.in_shop = False
+                            world.player.in_shop = False                     # <-- close shop
+                        elif ev.key == pygame.K_ESCAPE and world.player.placing_turret:
+                            world.player.placing_turret = False
+                            world.say("Turret placement cancelled")
                         else:
                             paused = not paused
                             game_state = "paused" if paused else "playing"
+
                     elif not paused:
                         if ev.key == pygame.K_r:
                             world = World()
+
+                        elif ev.key == pygame.K_c:
+                            # Cheat Key
+                            world.player.scrap+=10
+                            world.player.cores+=10
+                            world.player.turret_kits+=10
+
+                        elif ev.key == pygame.K_b:
+                            # Toggle shop when on the base
+                            if world.player.in_shop:
+                                world.player.in_shop = False
+                            else:
+                                world.open_shop()
+
                         elif ev.key == pygame.K_e:
                             world.deposit()
-                        elif ev.key == pygame.K_b:
-                            world.open_shop()
+
+                        elif ev.key == pygame.K_t:
+                            if world.player.turret_kits > 0:
+                                world.player.placing_turret = True
+                                world.say("Turret placement mode")
+                            else:
+                                world.say("No turret kits")
+
                         elif world.player.in_shop and ev.key in (
                             pygame.K_1, pygame.K_2, pygame.K_3, pygame.K_4, pygame.K_5, pygame.K_6
                         ):
@@ -577,6 +611,7 @@ def main():
                                 pygame.K_4:"capacity", pygame.K_5:"turret", pygame.K_6:"basehp"
                             }[ev.key]
                             world.buy(idx)
+
 
                 elif game_state == "paused":
                     if ev.key in (pygame.K_p, pygame.K_ESCAPE):
@@ -589,9 +624,9 @@ def main():
                     elif ev.key == pygame.K_q:
                         running = False
 
-            elif ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1:
+            elif ev.type == pygame.MOUSEBUTTONDOWN:
                 mx,my = ev.pos
-                if game_state == "menu":
+                if game_state == "menu" and ev.button==1:
                     rects = draw_main_menu(screen, menu_items, selected_index)
                     for i, r in enumerate(rects):
                         if r.collidepoint(mx,my):
@@ -607,29 +642,40 @@ def main():
                             elif choice == "Quit":
                                 running = False
                             break
-                elif game_state == "help":
+                elif game_state == "help" and ev.button==1:
                     back_rect = draw_help(screen)
                     if back_rect.collidepoint(mx,my):
                         game_state = "menu"
-                elif game_state == "paused" and world:
-                    # NEW: clickable pause menu
+                elif game_state == "paused" and world and ev.button==1:
                     buttons = world.draw_pause_menu(screen)
                     for label, rect in buttons:
                         if rect.collidepoint(mx,my):
                             if label == "Resume":
-                                paused = False
-                                game_state = "playing"
-                            elif label == "Main Menu":
-                                game_state = "menu"
-                                paused = False
-                                world = None
+                                paused = False; game_state = "playing"
                             elif label == "Restart":
-                                world = World()
-                                paused = False
-                                game_state = "playing"
+                                world = World(); paused = False; game_state = "playing"
+                            elif label == "Main Menu":
+                                game_state = "menu"; paused = False; world = None
                             elif label == "Quit":
                                 running = False
                             break
+                elif game_state == "playing" and world:
+                    # turret placement clicks
+                    if world.player.placing_turret:
+                        if ev.button == 1:  # left click: attempt place
+                            wx = mx + world.camera[0]
+                            wy = my + world.camera[1]
+                            gx, gy = int(wx//TILE), int(wy//TILE)
+                            if world.can_place_turret((gx,gy)):
+                                world.turrets.append(Turret((gx,gy)))
+                                world.player.turret_kits -= 1
+                                world.player.placing_turret = (world.player.turret_kits>0)
+                                world.say("Turret placed")
+                            else:
+                                world.say("Can't place there")
+                        elif ev.button == 3:  # right click: cancel
+                            world.player.placing_turret = False
+                            world.say("Turret placement cancelled")
 
         # Update
         if game_state == "playing" and (not paused) and world and (not world.player.in_shop) and world.base_hp > 0:
