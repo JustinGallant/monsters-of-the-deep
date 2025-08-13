@@ -177,24 +177,20 @@ class Bullet:
         self.slow_factor = slow_factor
         self.slow_dur = slow_dur
         self.color = color
-        # For wall-mounted turrets: let bullets clear the wall tile before colliding
-        self.dist_traveled = 0.0
-        self.grace_dist = 12  # pixels before wall collision check
 
     def update(self,dt,world):
         if not self.alive: return
         dx = self.vx*dt; dy = self.vy*dt
         self.x += dx; self.y += dy
-        self.dist_traveled += math.hypot(dx, dy)
 
         self.life -= dt
         if self.life <= 0:
             self.alive = False
 
-        if self.alive and self.dist_traveled > self.grace_dist:
-            gx,gy=int(self.x//TILE), int(self.y//TILE)
-            if world.is_solid(gx,gy):
-                self.alive=False
+        #if self.alive and self.dist_traveled > self.grace_dist:
+        #    gx,gy=int(self.x//TILE), int(self.y//TILE)
+        #    if world.is_solid(gx,gy):
+        #        self.alive=False
 
     def draw(self,surf):
         if self.alive:
