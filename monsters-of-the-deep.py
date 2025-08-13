@@ -119,6 +119,7 @@ class Enemy:
         self.x,self.y = self.gx*TILE+TILE/2, self.gy*TILE+TILE/2
         self.base_speed = 1.2 + 0.2*tier
         self.hp = 2 + tier
+        self.max_hp = self.hp
         self.damage = 4 + 2*tier
         self.tier=tier
         self.path_timer=0
@@ -184,6 +185,21 @@ class Enemy:
         pygame.draw.circle(surf, c, (int(self.x),int(self.y)), 10+self.tier)
         if self.slows:
             pygame.draw.circle(surf, CYAN, (int(self.x),int(self.y)), 12+self.tier,1)
+
+        # --- HP bar (show when damaged or recently hit) ---
+        if self.hp < self.max_hp or self.hit_timer > 0:
+            px, py = int(self.x), int(self.y)
+            w = 26 + self.tier*3   # slight size bump with tier
+            h = 4
+            ratio = max(0.0, min(1.0, self.hp / self.max_hp))
+            x = px - w//2
+            y = py - (14 + self.tier*2)
+
+            # border/background
+            pygame.draw.rect(surf, (30,30,30), pygame.Rect(x-1, y-1, w+2, h+2))
+            pygame.draw.rect(surf, (90,20,20),  pygame.Rect(x, y, w, h))
+            if ratio > 0:
+                pygame.draw.rect(surf, (80,210,120), pygame.Rect(x, y, int(w*ratio), h))
 
 class Pickup:
     def __init__(self,pos,kind="scrap",amount=1):
