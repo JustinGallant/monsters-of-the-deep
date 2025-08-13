@@ -90,9 +90,9 @@ class Bullet:
         self.slow_factor = slow_factor
         self.slow_dur = slow_dur
         self.color = color
-        # NEW: let bullets escape the wall they spawn in (for wall-mounted turrets)
+        # For wall-mounted turrets: let bullets clear the wall tile before colliding
         self.dist_traveled = 0.0
-        self.grace_dist = 12  # pixels of travel before wall collision is checked
+        self.grace_dist = 12  # pixels before wall collision check
 
     def update(self,dt,world):
         if not self.alive: return
@@ -104,7 +104,6 @@ class Bullet:
         if self.life <= 0:
             self.alive = False
 
-        # Ignore wall collision until bullet moved out a bit from its source wall
         if self.alive and self.dist_traveled > self.grace_dist:
             gx,gy=int(self.x//TILE), int(self.y//TILE)
             if world.is_solid(gx,gy):
@@ -219,40 +218,92 @@ TURRET_KINDS = {
     }
 }
 
+MAX_UPGRADE = 5  # per stat
+
 class Turret:
     def __init__(self,cell,turret_type="basic"):
         self.cell=cell
         self.x,self.y=cell[0]*TILE+TILE/2, cell[1]*TILE+TILE/2
         self.type = turret_type if turret_type in TURRET_KINDS else "basic"
-        cfg = TURRET_KINDS[self.type]
         self.cooldown=0
-        self.rate=cfg["rate"]
-        self.range=cfg["range"]
-        self.proj_speed=cfg["proj_speed"]
-        self.damage=cfg["damage"]
-        self.dot_dps=cfg["dot_dps"]; self.dot_dur=cfg["dot_dur"]
-        self.slow_factor=cfg["slow_factor"]; self.slow_dur=cfg["slow_dur"]
-        self.color=cfg["color"]; self.bullet_color = cfg["bullet_color"]
+        self.upgrades = {"dmg":0, "rng":0, "rate":0}  # per-turret levels
+
+    # ----- Upgrade economics -----
+    def upgrade_level(self, kind): return self.upgrades.get(kind,0)
+    def can_upgrade(self, kind): return self.upgrade_level(kind) < MAX_UPGRADE
+    def upgrade_cost(self, kind):
+        lvl = self.upgrade_level(kind)
+        base = {"dmg":6, "rng":5, "rate":7}[kind]
+        step = {"dmg":2, "rng":2, "rate":3}[kind]
+        return base + step*lvl
+
+    def apply_upgrade(self, kind):
+        if self.can_upgrade(kind):
+            self.upgrades[kind] += 1
+
+    # ----- Stats w/ upgrade scaling -----
+    def base_cfg(self):
+        return TURRET_KINDS[self.type]
+
+    def stats(self):
+        cfg = self.base_cfg()
+        ld = self.upgrade_level("dmg")
+        lr = self.upgrade_level("rng")
+        lf = self.upgrade_level("rate")
+
+        damage = cfg["damage"] * (1 + 0.25*ld)
+        dot_dps = cfg["dot_dps"] * (1 + 0.25*ld)
+        dot_dur = cfg["dot_dur"] * (1 + 0.20*ld) if cfg["dot_dur"]>0 else 0.0
+        # For ICE: extend slow duration with dmg upgrades (more control)
+        slow_factor = cfg["slow_factor"]
+        slow_dur = cfg["slow_dur"] * (1 + 0.20*ld) if cfg["slow_dur"]>0 else 0.0
+
+        rng = int(cfg["range"] * (1 + 0.15*lr))
+        proj_speed = cfg["proj_speed"] * (1 + 0.05*lr)
+
+        rate = cfg["rate"] * (0.88 ** lf)  # lower cooldown per level
+
+        return {
+            "damage": damage, "dot_dps": dot_dps, "dot_dur": dot_dur,
+            "slow_factor": slow_factor, "slow_dur": slow_dur,
+            "range": rng, "proj_speed": proj_speed, "rate": rate,
+            "color": cfg["color"], "bullet_color": cfg["bullet_color"]
+        }
+
     def update(self,dt,world):
         self.cooldown=max(0,self.cooldown-dt)
-        if self.cooldown==0 and world.enemies:
-            target=min(world.enemies, key=lambda e: dist((self.x,self.y),(e.x,e.y)))
-            if dist((self.x,self.y),(target.x,target.y))<self.range:
+        if not world.enemies:
+            return
+        st = self.stats()
+        # target closest within upgraded range
+        target=min(world.enemies, key=lambda e: dist((self.x,self.y),(e.x,e.y)))
+        if dist((self.x,self.y),(target.x,target.y))<st["range"]:
+            if self.cooldown==0:
                 ang=math.atan2(target.y-self.y, target.x-self.x)
-                vx,vy = math.cos(ang)*self.proj_speed, math.sin(ang)*self.proj_speed
+                vx,vy = math.cos(ang)*st["proj_speed"], math.sin(ang)*st["proj_speed"]
                 world.bullets.append(
                     Bullet(
                         (self.x,self.y),(vx,vy),
-                        damage=self.damage, life=1.5,
-                        dot_dps=self.dot_dps, dot_dur=self.dot_dur,
-                        slow_factor=self.slow_factor, slow_dur=self.slow_dur,
-                        color=self.bullet_color
+                        damage=st["damage"], life=1.5,
+                        dot_dps=st["dot_dps"], dot_dur=st["dot_dur"],
+                        slow_factor=st["slow_factor"], slow_dur=st["slow_dur"],
+                        color=st["bullet_color"]
                     )
                 )
-                self.cooldown=self.rate
+                self.cooldown=st["rate"]
+
     def draw(self,surf):
-        pygame.draw.circle(surf, self.color,(int(self.x),int(self.y)), 10)
+        st = self.stats()
+        pygame.draw.circle(surf, st["color"],(int(self.x),int(self.y)), 10)
         pygame.draw.circle(surf, WHITE,(int(self.x),int(self.y)), 10,1)
+        # small pips to show upgrade levels (dmg/rng/rate)
+        px,py=int(self.x),int(self.y)
+        for i,kind in enumerate(("dmg","rng","rate")):
+            lvl = self.upgrade_level(kind)
+            if lvl>0:
+                pygame.draw.rect(surf, WHITE, pygame.Rect(px-12+i*8, py+12, 6, 4))
+                if lvl>1:
+                    pygame.draw.rect(surf, WHITE, pygame.Rect(px-12+i*8, py+17, 6, 4))
 
 # ----------------------------
 # World
@@ -276,26 +327,57 @@ class World:
         self.deposit_radius=48
         self.message=""
         self.message_timer=0
+        # Upgrade UI state
+        self.upgrade_target = None
+
     def say(self,txt,dur=2.0):
         self.message=txt; self.message_timer=dur
+
     def is_solid(self,gx,gy):
         if 0<=gx<GRID_W and 0<=gy<GRID_H:
             return self.grid[gx][gy]==1
         return True
+
     def can_place_turret(self, cell):
         gx,gy = cell
         if not (0<=gx<GRID_W and 0<=gy<GRID_H):
             return False
-        # NEW: place on WALLS (must be solid)
+        # Place on WALLS (must be solid)
         if self.grid[gx][gy] == 0:
             return False
         for t in self.turrets:
             if t.cell == cell:
                 return False
         return True
+
+    # ---- Upgrades helpers ----
+    def nearest_turret_to_world(self, wx, wy, radius=28):
+        if not self.turrets: return None
+        best=None; bestd=1e9
+        for t in self.turrets:
+            d=dist((t.x,t.y),(wx,wy))
+            if d<radius and d<bestd:
+                best=t; bestd=d
+        return best
+
+    def upgrade_buy(self, kind):
+        t = self.upgrade_target
+        if not t: return
+        if not t.can_upgrade(kind):
+            self.say("Already at max level")
+            return
+        cost = t.upgrade_cost(kind)
+        if self.player.scrap < cost:
+            self.say(f"Need {cost} scrap")
+            return
+        self.player.scrap -= cost
+        t.apply_upgrade(kind)
+        self.say(f"Upgraded {kind.upper()} to L{t.upgrade_level(kind)}")
+
     def update(self,dt):
         self.message_timer=max(0,self.message_timer-dt)
         self.player.update(dt)
+
         for e in list(self.enemies):
             e.update(dt,self)
             if e.hp<=0:
@@ -323,12 +405,15 @@ class World:
                 self.player.backpack.append(p)
                 self.pickups.remove(p)
         for t in self.turrets: t.update(dt,self)
+
         self.spawn_timer-=dt
         if self.spawn_timer<=0:
             self.spawn_wave()
             self.spawn_timer = max(2.0, 8 - self.wave*0.5)
+
         self.camera=(int(self.player.x-WIDTH//2), int(self.player.y-HEIGHT//2))
         self.camera=(clamp(self.camera[0],0,GRID_W*TILE-WIDTH), clamp(self.camera[1],0,GRID_H*TILE-HEIGHT))
+
     def spawn_wave(self):
         count= min(3+self.wave, 18)
         for _ in range(count):
@@ -343,6 +428,7 @@ class World:
                     break
         self.wave += 1
         self.say(f"Wave {self.wave-1}!")
+
     def deposit(self):
         if dist((self.player.x,self.player.y),(self.base_cell[0]*TILE+TILE/2, self.base_cell[1]*TILE+TILE/2))<self.deposit_radius:
             scrap= sum(1 for p in self.player.backpack if p.kind=="scrap")
@@ -356,11 +442,13 @@ class World:
                 self.say("Backpack is empty")
         else:
             self.say("Stand on the base to deposit")
+
     def open_shop(self):
         if dist((self.player.x,self.player.y),(self.base_cell[0]*TILE+TILE/2, self.base_cell[1]*TILE+TILE/2))<self.deposit_radius:
             self.player.in_shop=True
         else:
             self.say("You must be on the base to shop")
+
     def buy(self, item):
         p=self.player
         if item=="speed" and p.scrap>=5:
@@ -381,6 +469,7 @@ class World:
             p.cores-=2; self.base_hp=min(200, self.base_hp+30); self.say("Base repaired +30")
         else:
             self.say("Not enough currency")
+
     def draw(self,screen):
         ox,oy = -self.camera[0], -self.camera[1]
         screen.fill((10,10,15))
@@ -394,14 +483,27 @@ class World:
         bx,by=self.base_cell[0]*TILE+TILE/2+ox, self.base_cell[1]*TILE+TILE/2+oy
         pygame.draw.circle(screen, (40,60,80), (int(bx),int(by)), self.deposit_radius)
         pygame.draw.circle(screen, (120,140,200), (int(bx),int(by)), self.deposit_radius,2)
+
         for p in self.pickups: p.draw(screen)
-        for t in self.turrets: t.draw(screen)
+        for t in self.turrets:
+            t.draw(screen)
+            # If it's the selected upgrade target, show its (upgraded) range
+            if t is self.upgrade_target:
+                rng = t.stats()["range"]
+                pygame.draw.circle(screen, (220,220,240), (int(t.x- self.camera[0]), int(t.y- self.camera[1])), rng, 1)
         for e in self.enemies: e.draw(screen)
         for b in self.bullets: b.draw(screen)
         self.player.draw(screen)
+
+        if self.upgrade_target:
+            overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+            overlay.fill((0, 0, 0, 120))
+            screen.blit(overlay, (0, 0))
+
         self.draw_turret_preview(screen)
         self.draw_darkness(screen)
         self.draw_ui(screen)
+
     def draw_turret_preview(self, screen):
         if not self.player.placing_turret: return
         mx, my = pygame.mouse.get_pos()
@@ -416,9 +518,10 @@ class World:
             col = (max(0,col[0]-80), max(0,col[1]-80), max(0,col[2]-80))
         pygame.draw.circle(screen, col, (int(cx),int(cy)), 12, 2)
         pygame.draw.circle(screen, WHITE, (int(cx),int(cy)), 12, 1)
-        # range ring
+        # range ring (base stats preview)
         rng = TURRET_KINDS[ttype]["range"]
         pygame.draw.circle(screen, (200,200,220), (int(cx),int(cy)), rng, 1)
+
     def draw_darkness(self,screen):
         dark = pygame.Surface((WIDTH,HEIGHT), pygame.SRCALPHA)
         px,py = int(self.player.x-self.camera[0]), int(self.player.y-self.camera[1])
@@ -427,6 +530,7 @@ class World:
             pygame.draw.circle(dark,(0,0,0,alpha),(px,py),r)
         pygame.draw.circle(dark,(0,0,0,0),(px,py), int(radius*0.6))
         screen.blit(dark,(0,0), special_flags=pygame.BLEND_RGBA_SUB)
+
     def draw_ui(self,screen):
         font=pygame.font.SysFont("consolas",18)
         big=pygame.font.SysFont("consolas",24, bold=True)
@@ -448,6 +552,9 @@ class World:
                 True, (220,220,240)
             )
             screen.blit(tip, (WIDTH//2 - tip.get_width()//2, HEIGHT-30))
+        if self.upgrade_target:
+            self.draw_upgrade_panel(screen)
+
     def draw_shop(self,screen):
         font=pygame.font.SysFont("consolas",18)
         panel=pygame.Surface((420,320))
@@ -469,6 +576,35 @@ class World:
         for i,l in enumerate(lines):
             panel.blit(font.render(l,True,WHITE),(12,12+i*24))
         screen.blit(panel,(WIDTH-440, HEIGHT-340))
+
+    def draw_upgrade_panel(self, screen):
+        t = self.upgrade_target
+        if not t: return
+        font=pygame.font.SysFont("consolas",18)
+        small=pygame.font.SysFont("consolas",16)
+        panel=pygame.Surface((420,210))
+        panel.fill((18,20,28))
+        pygame.draw.rect(panel,(140,180,240),panel.get_rect(),2)
+        title = f"UPGRADE TURRET [{t.type.upper()}] — scrap:{self.player.scrap}"
+        panel.blit(font.render(title, True, WHITE),(12,10))
+
+        # Levels & costs
+        def line(lbl, key, y):
+            lvl = t.upgrade_level(key)
+            cost = t.upgrade_cost(key)
+            maxed = lvl >= MAX_UPGRADE
+            text = f"{lbl}  Lvl {lvl}/{MAX_UPGRADE}  —  Cost: {cost} scrap"
+            col = (200,200,200) if not maxed else (160,160,160)
+            panel.blit(font.render(text, True, col),(24,y))
+            if maxed:
+                panel.blit(small.render("MAXED", True, (240,210,90)), (panel.get_width()-90, y))
+
+        line("1) +Damage (boosts DoT/slow duration on special)", "dmg", 52)
+        line("2) +Range", "rng", 84)
+        line("3) +Fire Rate (lower cooldown)", "rate", 116)
+        panel.blit(small.render("Press [1-3] to buy • [Esc] to close • Stand close to a turret & press U to open", True, (200,210,230)), (12, 160))
+        screen.blit(panel,(20, HEIGHT-240))
+
     def draw_pause_menu(self,screen):
         overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
         overlay.fill((0, 0, 0, 160))
@@ -507,6 +643,7 @@ class Player:
         self.turret_kits = {"basic":0, "flame":0, "ice":0}
         self.placing_turret = False
         self.placing_type = None
+
     def backpack_space(self):
         return len(self.backpack) < self.backpack_capacity
     def add_turret_kit(self, ttype):
@@ -522,6 +659,7 @@ class Player:
             self.placing_type = types[0]; return
         idx = types.index(self.placing_type)
         self.placing_type = types[(idx+1)%len(types)]
+
     def update(self,dt):
         keys=pygame.key.get_pressed()
         mx,my = pygame.mouse.get_pos()
@@ -531,7 +669,7 @@ class Player:
         vx,vy = dx/length*self.speed*120*dt, dy/length*self.speed*120*dt
         self.move(vx,vy)
         self.shoot_cooldown=max(0,self.shoot_cooldown-dt)
-        if pygame.mouse.get_pressed()[0] and self.shoot_cooldown==0 and self.world.base_hp>0 and not self.in_shop and not self.placing_turret:
+        if pygame.mouse.get_pressed()[0] and self.shoot_cooldown==0 and self.world.base_hp>0 and not self.in_shop and not self.placing_turret and not self.world.upgrade_target:
             px,py=self.x,self.y
             wx = mx + self.world.camera[0]
             wy = my + self.world.camera[1]
@@ -546,18 +684,21 @@ class Player:
                 self.hp-=12*dt
                 if self.hp<=0: self.respawn()
         self.x=clamp(self.x, 0, GRID_W*TILE-1); self.y=clamp(self.y, 0, GRID_H*TILE-1)
+
     def move(self,vx,vy):
         nx=self.x+vx; ny=self.y+vy
         if not self.world.is_solid(int(nx//TILE), int(self.y//TILE)):
             self.x=nx
         if not self.world.is_solid(int(self.x//TILE), int(ny//TILE)):
             self.y=ny
+
     def draw(self,screen):
         px,py=int(self.x-self.world.camera[0]), int(self.y-self.world.camera[1])
         pygame.draw.circle(screen, (200,200,220), (px,py), 10)
         for i,p in enumerate(self.backpack[:8]):
             color = BLUE if p.kind=="core" else GREEN
             pygame.draw.circle(screen, color, (px-14+i*6, py-18), 3)
+
     def respawn(self):
         self.x,self.y = self.world.base_cell[0]*TILE+TILE/2, self.world.base_cell[1]*TILE+TILE/2
         self.hp=self.max_hp
@@ -604,7 +745,7 @@ def draw_main_menu(surface, items, hovered_index):
 
 def draw_help(surface):
     draw_title(surface, "HOW TO PLAY")
-    panel = pygame.Surface((680, 360))
+    panel = pygame.Surface((680, 392))
     panel.fill((16,22,30))
     pygame.draw.rect(panel, (80,120,160), panel.get_rect(), 2)
     font=pygame.font.SysFont("consolas",20)
@@ -615,9 +756,10 @@ def draw_help(surface):
         "[1-8] buy in shop, [R] restart",
         "[Esc] or [P] pause",
         "T to enter turret placement (Tab to cycle type)",
+        "U near a turret: open upgrade panel (1-3 to buy)",
         "",
         "Protect the base in the center. Collect scrap and cores.",
-        "Spend scrap/cores in the shop to upgrade and survive waves."
+        "Spend scrap/cores in the shop; upgrade turrets with scrap."
     ]
     for i,l in enumerate(lines):
         panel.blit(font.render(l, True, WHITE), (16, 16 + i*32))
@@ -647,9 +789,9 @@ def main():
         "WASD to move, Mouse to aim/shoot",
         "[E] deposit on base, [B] shop on base",
         "[1-8] buy in shop, [R] restart, [Esc] close shop",
-        "T to place a turret kit (Tab to cycle)"
+        "T place turret kit (Tab cycle) • U to upgrade turret"
     ]
-    helpsurf=pygame.Surface((520,120))
+    helpsurf=pygame.Surface((620,120))
     helpsurf.fill((16,22,30))
     pygame.draw.rect(helpsurf,(80,120,160),helpsurf.get_rect(),2)
     for i,l in enumerate(help_lines):
@@ -689,10 +831,13 @@ def main():
                         game_state = "menu"
 
                 elif game_state == "playing":
-                    # Esc / P: close shop OR cancel placement OR pause/resume
+                    # Esc / P: close shop or upgrade, or cancel placement, or pause
                     if ev.key in (pygame.K_ESCAPE, pygame.K_p):
                         if world.player.in_shop:
                             world.player.in_shop = False
+                        elif world.upgrade_target:
+                            world.upgrade_target = None
+                            world.say("Closed upgrade panel")
                         elif ev.key == pygame.K_ESCAPE and world.player.placing_turret:
                             world.player.placing_turret = False
                             world.say("Turret placement cancelled")
@@ -706,7 +851,7 @@ def main():
 
                         elif ev.key == pygame.K_c:
                             # Cheat Key
-                            world.player.scrap+=10
+                            world.player.scrap+=15
                             world.player.cores+=10
                             for k in world.player.turret_kits:
                                 world.player.turret_kits[k]+=2
@@ -734,6 +879,21 @@ def main():
                         elif ev.key == pygame.K_TAB and world.player.placing_turret:
                             world.player.cycle_turret_type()
 
+                        elif ev.key == pygame.K_u and (not world.player.in_shop):
+                            # open upgrade panel for turret under cursor if close enough
+                            mx,my = pygame.mouse.get_pos()
+                            wx = mx + world.camera[0]
+                            wy = my + world.camera[1]
+                            t = world.nearest_turret_to_world(wx, wy, radius=24)
+                            if t and dist((world.player.x,world.player.y),(t.x,t.y))<=80:
+                                world.upgrade_target = t
+                                world.say("Upgrade: 1)Damage  2)Range  3)Rate  • Esc to close")
+                            elif t:
+                                world.say("Move closer to the turret to upgrade")
+                            else:
+                                world.say("No turret under cursor")
+
+                        # Shop buying (when shop open)
                         elif world.player.in_shop and ev.key in (
                             pygame.K_1, pygame.K_2, pygame.K_3, pygame.K_4,
                             pygame.K_5, pygame.K_6, pygame.K_7, pygame.K_8
@@ -744,6 +904,11 @@ def main():
                                 pygame.K_7:"turret_flame", pygame.K_8:"turret_ice"
                             }[ev.key]
                             world.buy(idx)
+
+                        # Upgrade purchases (when upgrade panel open)
+                        elif world.upgrade_target and ev.key in (pygame.K_1, pygame.K_2, pygame.K_3):
+                            kmap = {pygame.K_1:"dmg", pygame.K_2:"rng", pygame.K_3:"rate"}
+                            world.upgrade_buy(kmap[ev.key])
 
                 elif game_state == "paused":
                     if ev.key in (pygame.K_p, pygame.K_ESCAPE):
@@ -811,12 +976,25 @@ def main():
                                 world.say(f"{ttype.capitalize()} turret placed")
                             else:
                                 world.say("Can't place there")
-                        elif ev.button == 3:  # right click: cancel
+                        elif ev.button == 3:  # right click: cancel placement
                             world.player.placing_turret = False
                             world.say("Turret placement cancelled")
+                    # click outside to close upgrade panel
+                    elif world.upgrade_target and ev.button==1:
+                        # close if you click far from the panel and not on target turret
+                        wx = mx + world.camera[0]; wy = my + world.camera[1]
+                        if dist((wx,wy),(world.upgrade_target.x, world.upgrade_target.y))>80:
+                            world.upgrade_target=None
 
         # Update
-        if game_state == "playing" and (not paused) and world and (not world.player.in_shop) and world.base_hp > 0:
+        if (
+            game_state == "playing"
+            and (not paused)
+            and world
+            and (not world.player.in_shop)
+            and world.base_hp > 0
+            and (world.upgrade_target is None)  # <-- pause game logic during upgrade menu
+        ):
             world.update(dt)
 
         # Draw
