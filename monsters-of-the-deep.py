@@ -574,6 +574,10 @@ class World:
             p.cores-=4; p.add_turret_kit("ice"); self.say("Ice turret kit acquired")
         elif item=="basehp" and p.cores>=2:
             p.cores-=2; self.base_hp=min(200, self.base_hp+30); self.say("Base repaired +30")
+        elif item=="shotspeed" and p.scrap>=4:
+            p.scrap -= 4
+            p.fire_delay = max(0.06, p.fire_delay * 0.88)  # 12% faster (multiplicative)
+            self.say("Shot speed (fire rate) +12%")
         else:
             self.say("Not enough currency")
 
@@ -677,8 +681,9 @@ class World:
             "6) Repair Base +30 ...... 2 cores",
             "7) Flame Turret (DoT) ... 4 cores",
             "8) Ice Turret (Slow) .... 4 cores",
+            "9) Shot Speed +12% ...... 4 cores",
             "",
-            "Press [1-8] to buy."
+            "Press [1-9] to buy."
         ]
         for i,l in enumerate(lines):
             panel.blit(font.render(l,True,WHITE),(12,12+i*24))
@@ -745,6 +750,7 @@ class Player:
         self.scrap=0; self.cores=0
         self.in_shop=False
         self.shoot_cooldown=0
+        self.fire_delay=0.2
         self.flashlight_level=1
         # turret kits & placement
         self.turret_kits = {"basic":0, "flame":0, "ice":0}
@@ -785,7 +791,7 @@ class Player:
             self.world.bullets.append(
                 Bullet((px,py),(math.cos(ang)*speed, math.sin(ang)*speed),damage=self.attack_damage, color=YELLOW)
             )
-            self.shoot_cooldown=0.2
+            self.shoot_cooldown=self.fire_delay
         for e in list(self.world.enemies):
             if dist((self.x,self.y),(e.x,e.y))<14+e.tier:
                 self.hp-=12*dt
@@ -860,7 +866,7 @@ def draw_help(surface):
         "WASD or Arrow Keys to move",
         "Mouse to aim and Left Click to shoot",
         "[E] deposit on base, [B] shop on base",
-        "[1-8] buy in shop, [R] restart",
+        "[1-9] buy in shop, [R] restart",
         "[Esc] or [P] pause",
         "T to enter turret placement (Tab to cycle type)",
         "U near a turret: open upgrade panel (1-3 to buy)",
@@ -895,7 +901,7 @@ def main():
     help_lines=[
         "WASD to move, Mouse to aim/shoot",
         "[E] deposit on base, [B] shop on base",
-        "[1-8] buy in shop, [R] restart, [Esc] close shop",
+        "[1-9] buy in shop, [R] restart, [Esc] close shop",
         "T place turret kit (Tab cycle) • U to upgrade turret"
     ]
     helpsurf=pygame.Surface((620,120))
@@ -1003,12 +1009,13 @@ def main():
                         # Shop buying (when shop open)
                         elif world.player.in_shop and ev.key in (
                             pygame.K_1, pygame.K_2, pygame.K_3, pygame.K_4,
-                            pygame.K_5, pygame.K_6, pygame.K_7, pygame.K_8
+                            pygame.K_5, pygame.K_6, pygame.K_7, pygame.K_8, 
+                            pygame.K_9
                         ):
                             idx = {
                                 pygame.K_1:"speed", pygame.K_2:"damage", pygame.K_3:"hp",
                                 pygame.K_4:"capacity", pygame.K_5:"turret_basic", pygame.K_6:"basehp",
-                                pygame.K_7:"turret_flame", pygame.K_8:"turret_ice"
+                                pygame.K_7:"turret_flame", pygame.K_8:"turret_ice", pygame.K_9:"shotspeed"
                             }[ev.key]
                             world.buy(idx)
 
