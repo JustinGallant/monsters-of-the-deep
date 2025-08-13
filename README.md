@@ -8,7 +8,7 @@ Fight waves of monsters, collect scrap and cores, and upgrade your base to survi
 ## 📦 Installation
 
 **Requirements:**
-- Python 3.8+ (<a href="https://www.python.org/downloads/" target="_blank" rel="noopener noreferrer">link</a>)
+- Python 3.8+ (https://www.python.org/downloads/)
 - `pygame` library
 
 **Install pygame:**
