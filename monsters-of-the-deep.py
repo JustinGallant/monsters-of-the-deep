@@ -51,6 +51,93 @@ def generate_maze(w, h):
     return grid
 
 # ----------------------------
+# Connectivity fixes (guarantee all open tiles reachable from base)
+# ----------------------------
+def flood_reachable(grid, start):
+    """Return a set of open (0) cells reachable from start via 4-neighbors."""
+    w, h = len(grid), len(grid[0])
+    q = deque([start])
+    seen = set([start])
+    while q:
+        x, y = q.popleft()
+        for dx, dy in ((1,0),(-1,0),(0,1),(0,-1)):
+            nx, ny = x+dx, y+dy
+            if 0 <= nx < w and 0 <= ny < h and grid[nx][ny] == 0 and (nx,ny) not in seen:
+                seen.add((nx,ny)); q.append((nx,ny))
+    return seen
+
+def component_from(grid, seed, banned):
+    """Return one open component (set) grown from seed, avoiding 'banned' cells."""
+    w, h = len(grid), len(grid[0])
+    q = deque([seed])
+    comp = set([seed])
+    while q:
+        x, y = q.popleft()
+        for dx, dy in ((1,0),(-1,0),(0,1),(0,-1)):
+            nx, ny = x+dx, y+dy
+            if 0 <= nx < w and 0 <= ny < h and grid[nx][ny] == 0 and (nx,ny) not in comp and (nx,ny) not in banned:
+                comp.add((nx,ny)); q.append((nx,ny))
+    return comp
+
+def connect_component_with_wall_knock(grid, comp, main):
+    """
+    Try to connect 'comp' to 'main' by converting a single separating wall to floor.
+    Returns True if successful.
+    """
+    w, h = len(grid), len(grid[0])
+    for (x, y) in comp:
+        for dx, dy in ((1,0),(-1,0),(0,1),(0,-1)):
+            wx, wy = x+dx, y+dy
+            ox, oy = x+2*dx, y+2*dy
+            if 0 <= wx < w and 0 <= wy < h and grid[wx][wy] == 1:
+                if 0 <= ox < w and 0 <= oy < h and grid[ox][oy] == 0 and (ox,oy) in main:
+                    grid[wx][wy] = 0
+                    return True
+    return False
+
+def carve_corridor(grid, a, b):
+    """Carve a thin Manhattan corridor from a to b (inclusive)."""
+    ax, ay = a; bx, by = b
+    x, y = ax, ay
+    while x != bx:
+        x += 1 if bx > x else -1
+        grid[x][y] = 0
+    while y != by:
+        y += 1 if by > y else -1
+        grid[x][y] = 0
+
+def ensure_full_connectivity(grid, start):
+    """
+    Ensure all open cells (0) are reachable from 'start'.
+    Mutates 'grid' to connect stray open components back to the main region.
+    """
+    w, h = len(grid), len(grid[0])
+    main = flood_reachable(grid, start)
+    all_open = {(x,y) for x in range(w) for y in range(h) if grid[x][y] == 0}
+    remaining = list(all_open - main)
+
+    while remaining:
+        comp = component_from(grid, remaining[0], banned=main)
+        if connect_component_with_wall_knock(grid, comp, main):
+            main = flood_reachable(grid, start)
+        else:
+            # carve corridor to nearest main tile
+            best_pair = None
+            best_d = 10**9
+            for cx, cy in comp:
+                for mx, my in main:
+                    d = abs(cx - mx) + abs(cy - my)
+                    if d < best_d:
+                        best_d = d
+                        best_pair = ((cx,cy), (mx,my))
+            if best_pair:
+                carve_corridor(grid, best_pair[0], best_pair[1])
+                main = flood_reachable(grid, start)
+
+        all_open = {(x,y) for x in range(w) for y in range(h) if grid[x][y] == 0}
+        remaining = list(all_open - main)
+
+# ----------------------------
 # Pathfinding on grid (BFS for next step)
 # ----------------------------
 def bfs_next_step(grid, start, goal):
@@ -119,7 +206,7 @@ class Enemy:
         self.x,self.y = self.gx*TILE+TILE/2, self.gy*TILE+TILE/2
         self.base_speed = 1.2 + 0.2*tier
         self.hp = 2 + tier
-        self.max_hp = self.hp
+        self.max_hp = self.hp  # track max HP for HP bar
         self.damage = 4 + 2*tier
         self.tier=tier
         self.path_timer=0
@@ -331,6 +418,10 @@ class World:
         for x in range(self.base_cell[0]-2, self.base_cell[0]+3):
             for y in range(self.base_cell[1]-2, self.base_cell[1]+3):
                 if 0<=x<GRID_W and 0<=y<GRID_H: self.grid[x][y]=0
+
+        # Ensure everything is reachable from the base
+        ensure_full_connectivity(self.grid, self.base_cell)
+
         self.player = Player(self, (self.base_cell[0]*TILE+TILE/2, self.base_cell[1]*TILE+TILE/2))
         self.enemies=[]
         self.pickups=[]
