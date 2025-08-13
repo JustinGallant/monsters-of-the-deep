@@ -741,17 +741,20 @@ class World:
 
 class Player:
     def __init__(self, world, pos):
+        # position
         self.world=world
         self.x,self.y=pos
+        # attributes
         self.speed=2.1
         self.max_hp=100; self.hp=self.max_hp
         self.attack_damage=1.0
         self.backpack=[]; self.backpack_capacity=5
-        self.scrap=0; self.cores=0
-        self.in_shop=False
         self.shoot_cooldown=0
         self.fire_delay=0.2
         self.flashlight_level=1
+        self.in_shop=False
+        # currency
+        self.scrap=0; self.cores=0
         # turret kits & placement
         self.turret_kits = {"basic":0, "flame":0, "ice":0}
         self.placing_turret = False
