@@ -1,2 +1,16 @@
-# monsters-of-the-deep
-Little side project.
+# Monsters of the Deep — A Tiny Roguelite Prototype
+
+A small top-down roguelite defense game built with **pygame**.  
+Fight waves of monsters, collect scrap and cores, and upgrade your base to survive as long as possible.
+
+---
+
+## 📦 Installation
+
+**Requirements:**
+- Python 3.8+ (https://www.python.org/downloads/)
+- `pygame` library
+
+**Install pygame:**
+```bash
+pip install pygame
