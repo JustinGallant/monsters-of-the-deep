@@ -1,7 +1,3 @@
-# Monsters of the Deep — tiny roguelite prototype
-# Run with: python monsters_of_the_deep.py
-# No external assets required. Requires pygame (pip install pygame).
-
 import pygame, random, math, time
 from collections import deque
 
@@ -445,6 +441,70 @@ class Player:
         self.world.say("You were knocked out! Dropped some loot.", 2.5)
 
 # ----------------------------
+# Menu helpers
+# ----------------------------
+def draw_button(surface, rect, text, hovered=False):
+    pygame.draw.rect(surface, (20,28,36), rect)
+    pygame.draw.rect(surface, (80,120,160) if hovered else (60,90,120), rect, 2)
+    font = pygame.font.SysFont("consolas", 26, bold=True)
+    label = font.render(text, True, WHITE)
+    surface.blit(label, (rect.centerx - label.get_width()//2, rect.centery - label.get_height()//2))
+
+def draw_title(surface, title, subtitle=None):
+    surface.fill((10,10,15))
+    big = pygame.font.SysFont("consolas", 40, bold=True)
+    sub = pygame.font.SysFont("consolas", 20)
+    t = big.render(title, True, (200,220,255))
+    surface.blit(t, (WIDTH//2 - t.get_width()//2, 120))
+    if subtitle:
+        s = sub.render(subtitle, True, (180, 190, 210))
+        surface.blit(s, (WIDTH//2 - s.get_width()//2, 170))
+
+def draw_main_menu(surface, items, hovered_index):
+    draw_title(surface, "MONSTERS OF THE DEEP", "tiny roguelite prototype")
+    start_y = 240
+    spacing = 72
+    btn_w, btn_h = 360, 56
+    mx,my = pygame.mouse.get_pos()
+    rects=[]
+    for i, label in enumerate(items):
+        rect = pygame.Rect(WIDTH//2 - btn_w//2, start_y + i*spacing, btn_w, btn_h)
+        rects.append(rect)
+        hovered = rect.collidepoint(mx,my) or (hovered_index == i)
+        draw_button(surface, rect, label, hovered)
+    # footer
+    tiny = pygame.font.SysFont("consolas", 16)
+    hint = tiny.render("W/S or ↑/↓ to navigate • Enter/Space to select • Mouse supported", True, (160,170,190))
+    surface.blit(hint, (WIDTH//2 - hint.get_width()//2, HEIGHT-60))
+    return rects
+
+def draw_help(surface):
+    draw_title(surface, "HOW TO PLAY")
+    panel = pygame.Surface((680, 320))
+    panel.fill((16,22,30))
+    pygame.draw.rect(panel, (80,120,160), panel.get_rect(), 2)
+    font=pygame.font.SysFont("consolas",20)
+    lines = [
+        "WASD or Arrow Keys to move",
+        "Mouse to aim and Left Click to shoot",
+        "[E] deposit on base, [B] shop on base",
+        "[1-6] buy in shop, [R] restart",
+        "[Esc] or [P] pause",
+        "",
+        "Protect the base in the center. Collect scrap and cores.",
+        "Spend scrap/cores in the shop to upgrade and survive waves."
+    ]
+    for i,l in enumerate(lines):
+        panel.blit(font.render(l, True, WHITE), (16, 16 + i*32))
+    surface.blit(panel, (WIDTH//2 - panel.get_width()//2, 230))
+
+    # Back button
+    rect = pygame.Rect(WIDTH//2 - 140, HEIGHT - 100, 280, 52)
+    mx,my = pygame.mouse.get_pos()
+    draw_button(surface, rect, "Back", rect.collidepoint(mx,my))
+    return rect
+
+# ----------------------------
 # Game loop
 # ----------------------------
 def main():
@@ -452,10 +512,16 @@ def main():
     screen=pygame.display.set_mode((WIDTH,HEIGHT))
     pygame.display.set_caption("Monsters of the Deep — roguelite prototype")
     clock=pygame.time.Clock()
-    world=World()
+
+    # Game state
+    game_state = "menu"  # "menu", "help", "playing", "paused"
+    selected_index = 0
+    menu_items = ["Start Game", "How to Play", "Quit"]
+    world=None
     paused=False
+
+    # Pre-render help toast for in-game (unchanged)
     font=pygame.font.SysFont("consolas",18)
-    # Controls help toast
     help_lines=[
         "WASD to move, Mouse to aim/shoot",
         "[E] deposit on base, [B] shop on base",
@@ -472,55 +538,120 @@ def main():
     while running:
         dt = clock.tick(FPS) / 1000.0
 
+        # ----- Event handling -----
         for ev in pygame.event.get():
             if ev.type == pygame.QUIT:
                 running = False
-            elif ev.type == pygame.KEYDOWN:
-                # Toggle pause (works even if not on base / shop closed)
-                if ev.key in (pygame.K_p, pygame.K_ESCAPE):
-                    if world.player.in_shop:
-                        world.player.in_shop = False
-                    else:
-                        paused = not paused
 
-                # When paused, handle pause menu actions
-                elif paused:
-                    if ev.key == pygame.K_r:      # Restart from pause
+            elif ev.type == pygame.KEYDOWN:
+                if game_state == "menu":
+                    if ev.key in (pygame.K_DOWN, pygame.K_s):
+                        selected_index = (selected_index + 1) % len(menu_items)
+                    elif ev.key in (pygame.K_UP, pygame.K_w):
+                        selected_index = (selected_index - 1) % len(menu_items)
+                    elif ev.key in (pygame.K_RETURN, pygame.K_SPACE):
+                        choice = menu_items[selected_index]
+                        if choice == "Start Game":
+                            world = World()
+                            game_state = "playing"
+                            paused = False
+                            help_timer = 5.0
+                        elif choice == "How to Play":
+                            game_state = "help"
+                        elif choice == "Quit":
+                            running = False
+                    elif ev.key in (pygame.K_ESCAPE,):
+                        running = False
+
+                elif game_state == "help":
+                    if ev.key in (pygame.K_ESCAPE, pygame.K_RETURN, pygame.K_SPACE):
+                        game_state = "menu"
+
+                elif game_state == "playing":
+                    # Toggle pause (works even if not on base / shop closed)
+                    if ev.key in (pygame.K_p, pygame.K_ESCAPE):
+                        if world.player.in_shop:
+                            world.player.in_shop = False
+                        else:
+                            paused = not paused
+                            game_state = "paused" if paused else "playing"
+                    elif not paused:
+                        if ev.key == pygame.K_r:
+                            world = World()
+                        elif ev.key == pygame.K_e:
+                            world.deposit()
+                        elif ev.key == pygame.K_b:
+                            world.open_shop()
+                        elif world.player.in_shop and ev.key in (
+                            pygame.K_1, pygame.K_2, pygame.K_3, pygame.K_4, pygame.K_5, pygame.K_6
+                        ):
+                            idx = {
+                                pygame.K_1:"speed", pygame.K_2:"damage", pygame.K_3:"hp",
+                                pygame.K_4:"capacity", pygame.K_5:"turret", pygame.K_6:"basehp"
+                            }[ev.key]
+                            world.buy(idx)
+
+                elif game_state == "paused":
+                    if ev.key in (pygame.K_p, pygame.K_ESCAPE):
+                        paused = False
+                        game_state = "playing"
+                    elif ev.key == pygame.K_r:      # Restart from pause
                         world = World()
                         paused = False
+                        game_state = "playing"
                     elif ev.key == pygame.K_q:    # Quit from pause
                         running = False
 
-                # Normal (unpaused) gameplay keys:
-                elif not paused:
-                    if ev.key == pygame.K_r:
-                        world = World()
-                    elif ev.key == pygame.K_e:
-                        world.deposit()
-                    elif ev.key == pygame.K_b:
-                        world.open_shop()
-                    elif world.player.in_shop and ev.key in (
-                        pygame.K_1, pygame.K_2, pygame.K_3, pygame.K_4, pygame.K_5, pygame.K_6
-                    ):
-                        idx = {
-                            pygame.K_1:"speed", pygame.K_2:"damage", pygame.K_3:"hp",
-                            pygame.K_4:"capacity", pygame.K_5:"turret", pygame.K_6:"basehp"
-                        }[ev.key]
-                        world.buy(idx)
+            elif ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1:
+                mx,my = ev.pos
+                if game_state == "menu":
+                    rects = draw_main_menu(screen, menu_items, selected_index)  # to get rects this frame
+                    for i, r in enumerate(rects):
+                        if r.collidepoint(mx,my):
+                            selected_index = i
+                            choice = menu_items[i]
+                            if choice == "Start Game":
+                                world = World()
+                                game_state = "playing"
+                                paused = False
+                                help_timer = 5.0
+                            elif choice == "How to Play":
+                                game_state = "help"
+                            elif choice == "Quit":
+                                running = False
+                            break
+                elif game_state == "help":
+                    back_rect = draw_help(screen)  # get rect
+                    if back_rect.collidepoint(mx,my):
+                        game_state = "menu"
 
-        # ---- frame update/draw (inside the while loop) ----
-        if (not paused) and (not world.player.in_shop) and world.base_hp > 0:
+        # ----- Update -----
+        if game_state == "playing" and (not paused) and world and (not world.player.in_shop) and world.base_hp > 0:
             world.update(dt)
 
-        world.draw(screen)
+        # ----- Draw -----
+        if game_state in ("menu", "help"):
+            if game_state == "menu":
+                # Hover detection for keyboard focus is separate; mouse hover highlights as well
+                rects = draw_main_menu(screen, menu_items, -1)  # -1 means rely on mouse hover only
+                # If no mouse movement, show keyboard selection highlight
+                # overlay selection frame
+                if 0 <= selected_index < len(rects):
+                    pygame.draw.rect(screen, (240,210,90), rects[selected_index], 3)
+            else:
+                draw_help(screen)
 
-        if paused:
-            world.draw_pause_menu(screen)
+        else:
+            # In-game drawing
+            if world:
+                world.draw(screen)
+            if paused and world:
+                world.draw_pause_menu(screen)
 
-        # One-time help toast
-        if help_timer > 0:
-            help_timer -= dt
-            screen.blit(helpsurf, (10, HEIGHT - helpsurf.get_height() - 10))
+            # One-time help toast (in-game only)
+            if help_timer > 0 and world:
+                help_timer -= dt
+                screen.blit(helpsurf, (10, HEIGHT - helpsurf.get_height() - 10))
 
         pygame.display.flip()
 
@@ -530,4 +661,3 @@ def main():
 
 if __name__=="__main__":
     main()
-
