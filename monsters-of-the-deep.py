@@ -301,7 +301,6 @@ class World:
                 if self.grid[x][y]==1:
                     pygame.draw.rect(screen, GREY, rect)
                 else:
-                    # subtle floor grid
                     pygame.draw.rect(screen, (20,20,26), rect,1)
         # base area
         bx,by=self.base_cell[0]*TILE+TILE/2+ox, self.base_cell[1]*TILE+TILE/2+oy
@@ -312,24 +311,19 @@ class World:
         for e in self.enemies: e.draw(screen)
         for b in self.bullets: b.draw(screen)
         self.player.draw(screen)
-        # Darkness / flashlight
         self.draw_darkness(screen)
-        # UI
         self.draw_ui(screen)
     def draw_darkness(self,screen):
         dark = pygame.Surface((WIDTH,HEIGHT), pygame.SRCALPHA)
-        # main light
         px,py = int(self.player.x-self.camera[0]), int(self.player.y-self.camera[1])
         radius = 130 + int(20*self.player.flashlight_level)
         for r,alpha in [(radius,180),(radius//2,90)]:
             pygame.draw.circle(dark,(0,0,0,alpha),(px,py),r)
-        # cutout center
         pygame.draw.circle(dark,(0,0,0,0),(px,py), int(radius*0.6))
         screen.blit(dark,(0,0), special_flags=pygame.BLEND_RGBA_SUB)
     def draw_ui(self,screen):
         font=pygame.font.SysFont("consolas",18)
         big=pygame.font.SysFont("consolas",24, bold=True)
-        # stats
         text=f"HP {int(self.player.hp)}/{int(self.player.max_hp)}  Scrap:{self.player.scrap}  Cores:{self.player.cores}  Backpack:{len(self.player.backpack)}/{self.player.backpack_capacity}  Wave:{self.wave-1}  BaseHP:{int(self.base_hp)}"
         screen.blit(font.render(text,True,WHITE),(10,10))
         if self.message_timer>0:
@@ -359,25 +353,32 @@ class World:
         for i,l in enumerate(lines):
             panel.blit(font.render(l,True,WHITE),(12,12+i*24))
         screen.blit(panel,(WIDTH-400, HEIGHT-280))
+
+    # --- NEW: pause menu with clickable buttons ---
     def draw_pause_menu(self,screen):
         overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
-        overlay.fill((0, 0, 0, 160))  # translucent dark overlay
+        overlay.fill((0, 0, 0, 160))
         screen.blit(overlay, (0, 0))
 
         title_font = pygame.font.SysFont("consolas", 36, bold=True)
-        item_font  = pygame.font.SysFont("consolas", 22)
-
         title = title_font.render("PAUSED", True, (255, 255, 255))
-        screen.blit(title, (WIDTH//2 - title.get_width()//2, HEIGHT//2 - 120))
+        screen.blit(title, (WIDTH//2 - title.get_width()//2, HEIGHT//2 - 160))
 
-        items = [
-            "Resume — Esc or P",
-            "Restart — R",
-            "Quit — Q",
-        ]
-        for i, text in enumerate(items):
-            surf = item_font.render(text, True, (230, 230, 230))
-            screen.blit(surf, (WIDTH//2 - surf.get_width()//2, HEIGHT//2 - 40 + i*36))
+        # buttons
+        labels = ["Resume", "Main Menu", "Restart", "Quit"]
+        btn_w, btn_h = 320, 56
+        spacing = 72
+        start_y = HEIGHT//2 - 60
+        mx,my = pygame.mouse.get_pos()
+        rects = []
+        for i, label in enumerate(labels):
+            rect = pygame.Rect(WIDTH//2 - btn_w//2, start_y + i*spacing, btn_w, btn_h)
+            hovered = rect.collidepoint(mx,my)
+            draw_button(screen, rect, label, hovered)
+            rects.append((label, rect))
+        hint = pygame.font.SysFont("consolas", 16).render("Press P/Esc to resume", True, (200,210,230))
+        screen.blit(hint, (WIDTH//2 - hint.get_width()//2, start_y + len(labels)*spacing + 10))
+        return rects
 
 class Player:
     def __init__(self, world, pos):
@@ -394,13 +395,11 @@ class Player:
     def update(self,dt):
         keys=pygame.key.get_pressed()
         mx,my = pygame.mouse.get_pos()
-        # movement
         dx=(keys[pygame.K_d] or keys[pygame.K_RIGHT]) - (keys[pygame.K_a] or keys[pygame.K_LEFT])
         dy=(keys[pygame.K_s] or keys[pygame.K_DOWN]) - (keys[pygame.K_w] or keys[pygame.K_UP])
         length=math.hypot(dx,dy) or 1.0
         vx,vy = dx/length*self.speed*120*dt, dy/length*self.speed*120*dt
         self.move(vx,vy)
-        # shoot
         self.shoot_cooldown=max(0,self.shoot_cooldown-dt)
         if pygame.mouse.get_pressed()[0] and self.shoot_cooldown==0 and self.world.base_hp>0 and not self.in_shop:
             px,py=self.x,self.y
@@ -410,30 +409,24 @@ class Player:
             speed=520
             self.world.bullets.append(Bullet((px,py),(math.cos(ang)*speed, math.sin(ang)*speed),damage=self.attack_damage))
             self.shoot_cooldown=0.2
-        # touch enemies hurts
         for e in list(self.world.enemies):
             if dist((self.x,self.y),(e.x,e.y))<14+e.tier:
                 self.hp-=12*dt
                 if self.hp<=0: self.respawn()
-        # clamp to world bounds
         self.x=clamp(self.x, 0, GRID_W*TILE-1); self.y=clamp(self.y, 0, GRID_H*TILE-1)
     def move(self,vx,vy):
         nx=self.x+vx; ny=self.y+vy
-        # X axis
         if not self.world.is_solid(int(nx//TILE), int(self.y//TILE)):
             self.x=nx
-        # Y axis
         if not self.world.is_solid(int(self.x//TILE), int(ny//TILE)):
             self.y=ny
     def draw(self,screen):
         px,py=int(self.x-self.world.camera[0]), int(self.y-self.world.camera[1])
         pygame.draw.circle(screen, (200,200,220), (px,py), 10)
-        # backpack icons
         for i,p in enumerate(self.backpack[:8]):
             color = BLUE if p.kind=="core" else GREEN
             pygame.draw.circle(screen, color, (px-14+i*6, py-18), 3)
     def respawn(self):
-        # respawn on base with some penalty
         self.x,self.y = self.world.base_cell[0]*TILE+TILE/2, self.world.base_cell[1]*TILE+TILE/2
         self.hp=self.max_hp
         lost=int(len(self.backpack)*0.7)
@@ -472,7 +465,6 @@ def draw_main_menu(surface, items, hovered_index):
         rects.append(rect)
         hovered = rect.collidepoint(mx,my) or (hovered_index == i)
         draw_button(surface, rect, label, hovered)
-    # footer
     tiny = pygame.font.SysFont("consolas", 16)
     hint = tiny.render("W/S or ↑/↓ to navigate • Enter/Space to select • Mouse supported", True, (160,170,190))
     surface.blit(hint, (WIDTH//2 - hint.get_width()//2, HEIGHT-60))
@@ -498,7 +490,6 @@ def draw_help(surface):
         panel.blit(font.render(l, True, WHITE), (16, 16 + i*32))
     surface.blit(panel, (WIDTH//2 - panel.get_width()//2, 230))
 
-    # Back button
     rect = pygame.Rect(WIDTH//2 - 140, HEIGHT - 100, 280, 52)
     mx,my = pygame.mouse.get_pos()
     draw_button(surface, rect, "Back", rect.collidepoint(mx,my))
@@ -513,14 +504,12 @@ def main():
     pygame.display.set_caption("Monsters of the Deep — roguelite prototype")
     clock=pygame.time.Clock()
 
-    # Game state
     game_state = "menu"  # "menu", "help", "playing", "paused"
     selected_index = 0
     menu_items = ["Start Game", "How to Play", "Quit"]
     world=None
     paused=False
 
-    # Pre-render help toast for in-game (unchanged)
     font=pygame.font.SysFont("consolas",18)
     help_lines=[
         "WASD to move, Mouse to aim/shoot",
@@ -538,7 +527,6 @@ def main():
     while running:
         dt = clock.tick(FPS) / 1000.0
 
-        # ----- Event handling -----
         for ev in pygame.event.get():
             if ev.type == pygame.QUIT:
                 running = False
@@ -568,7 +556,6 @@ def main():
                         game_state = "menu"
 
                 elif game_state == "playing":
-                    # Toggle pause (works even if not on base / shop closed)
                     if ev.key in (pygame.K_p, pygame.K_ESCAPE):
                         if world.player.in_shop:
                             world.player.in_shop = False
@@ -595,17 +582,17 @@ def main():
                     if ev.key in (pygame.K_p, pygame.K_ESCAPE):
                         paused = False
                         game_state = "playing"
-                    elif ev.key == pygame.K_r:      # Restart from pause
+                    elif ev.key == pygame.K_r:
                         world = World()
                         paused = False
                         game_state = "playing"
-                    elif ev.key == pygame.K_q:    # Quit from pause
+                    elif ev.key == pygame.K_q:
                         running = False
 
             elif ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1:
                 mx,my = ev.pos
                 if game_state == "menu":
-                    rects = draw_main_menu(screen, menu_items, selected_index)  # to get rects this frame
+                    rects = draw_main_menu(screen, menu_items, selected_index)
                     for i, r in enumerate(rects):
                         if r.collidepoint(mx,my):
                             selected_index = i
@@ -621,43 +608,53 @@ def main():
                                 running = False
                             break
                 elif game_state == "help":
-                    back_rect = draw_help(screen)  # get rect
+                    back_rect = draw_help(screen)
                     if back_rect.collidepoint(mx,my):
                         game_state = "menu"
+                elif game_state == "paused" and world:
+                    # NEW: clickable pause menu
+                    buttons = world.draw_pause_menu(screen)
+                    for label, rect in buttons:
+                        if rect.collidepoint(mx,my):
+                            if label == "Resume":
+                                paused = False
+                                game_state = "playing"
+                            elif label == "Main Menu":
+                                game_state = "menu"
+                                paused = False
+                                world = None
+                            elif label == "Restart":
+                                world = World()
+                                paused = False
+                                game_state = "playing"
+                            elif label == "Quit":
+                                running = False
+                            break
 
-        # ----- Update -----
+        # Update
         if game_state == "playing" and (not paused) and world and (not world.player.in_shop) and world.base_hp > 0:
             world.update(dt)
 
-        # ----- Draw -----
+        # Draw
         if game_state in ("menu", "help"):
             if game_state == "menu":
-                # Hover detection for keyboard focus is separate; mouse hover highlights as well
-                rects = draw_main_menu(screen, menu_items, -1)  # -1 means rely on mouse hover only
-                # If no mouse movement, show keyboard selection highlight
-                # overlay selection frame
+                rects = draw_main_menu(screen, menu_items, -1)
                 if 0 <= selected_index < len(rects):
                     pygame.draw.rect(screen, (240,210,90), rects[selected_index], 3)
             else:
                 draw_help(screen)
-
         else:
-            # In-game drawing
             if world:
                 world.draw(screen)
             if paused and world:
                 world.draw_pause_menu(screen)
-
-            # One-time help toast (in-game only)
-            if help_timer > 0 and world:
+            if help_timer > 0 and world and game_state == "playing":
                 help_timer -= dt
                 screen.blit(helpsurf, (10, HEIGHT - helpsurf.get_height() - 10))
 
         pygame.display.flip()
 
-    # after loop ends
     pygame.quit()
-
 
 if __name__=="__main__":
     main()
