@@ -166,7 +166,11 @@ def bfs_next_step(grid, start, goal):
 # Entities
 # ----------------------------
 class Bullet:
-    def __init__(self,pos,vel,damage=1,life=1.5, dot_dps=0, dot_dur=0, slow_factor=1.0, slow_dur=0, color=YELLOW, playerBullet=False):
+    def __init__(self, pos, vel, damage=1, life=1.5,
+                 dot_dps=0, dot_dur=0, slow_factor=1.0, slow_dur=0,
+                 color=YELLOW, playerBullet=False,
+                 crit_chance=0.0, crit_mult=1.5,
+                 is_crit=False):
         self.x,self.y = pos
         self.vx,self.vy = vel
         self.damage=damage
@@ -179,23 +183,66 @@ class Bullet:
         self.color = color
         self.playerBullet=playerBullet
 
+        # --- crit (pre-rolled) ---
+        self.is_crit = bool(is_crit)
+        # disable re-roll on hit; we use pre-roll flag
+        self.crit_chance = 0.0
+        self.crit_mult   = crit_mult
+
+        # --- visuals ---
+        self.base_radius = 3
+        self.radius = self.base_radius + (2 if self.is_crit else 0)
+
+        # trail: a few fading points behind the bullet
+        self.trail_maxlife = 0.35 if self.is_crit else 0.25
+        self.trail = deque(maxlen=16 if self.is_crit else 10)
+
     def update(self,dt,world):
         if not self.alive: return
-        dx = self.vx*dt; dy = self.vy*dt
-        self.x += dx; self.y += dy
 
+        # leave a breadcrumb
+        self.trail.append([self.x, self.y, self.trail_maxlife])
+
+        self.x += self.vx*dt
+        self.y += self.vy*dt
+
+        # age out
         self.life -= dt
         if self.life <= 0:
             self.alive = False
 
+        # fade trail
+        for seg in list(self.trail):
+            seg[2] -= dt
+            if seg[2] <= 0:
+                try: self.trail.remove(seg)
+                except ValueError: pass
+
+        # player bullets stop at walls
         if self.alive and self.playerBullet:
             gx,gy=int(self.x//TILE), int(self.y//TILE)
             if world.is_solid(gx,gy):
                 self.alive=False
 
-    def draw(self,surf):
-        if self.alive:
-            pygame.draw.circle(surf, self.color, (int(self.x),int(self.y)), 3)
+    def draw(self,surf, cam=(0,0)):
+        if not self.alive: return
+        px = int(self.x - cam[0]); py = int(self.y - cam[1])
+
+        # --- trail (alpha circles on small SRCALPHA surfaces)
+        trail_col = (255, 90, 220) if self.is_crit else self.color
+        for (tx, ty, tlife) in self.trail:
+            alpha = int(180 * max(0.0, tlife / self.trail_maxlife))
+            r = max(1, int(self.radius * (0.6 + 0.4 * (tlife / self.trail_maxlife))))
+            ts = r*2 + 2
+            s = pygame.Surface((ts, ts), pygame.SRCALPHA)
+            pygame.draw.circle(s, (*trail_col, alpha), (ts//2, ts//2), r)
+            surf.blit(s, (int(tx - cam[0]) - r, int(ty - cam[1]) - r))
+
+        # --- core bullet
+        core_col = (255, 255, 255) if self.is_crit else self.color
+        pygame.draw.circle(surf, core_col, (px, py), self.radius)
+        if self.is_crit:
+            pygame.draw.circle(surf, (255, 90, 220), (px, py), self.radius+2, 1)  # ring for crits
 
 class Enemy:
     def __init__(self,grid_pos, tier=1):
@@ -264,15 +311,16 @@ class Enemy:
             self.gx,self.gy=int(self.x//TILE), int(self.y//TILE)
         if (self.gx,self.gy)==world.base_cell:
             world.base_hp = max(0, world.base_hp - self.damage*dt)
+
     def draw(self,surf,cam):
+        px = int(self.x - cam[0]); py = int(self.y - cam[1])
         c = (200,60,60) if self.hit_timer<=0 else (255,200,200)
-        pygame.draw.circle(surf, c, (int(self.x),int(self.y)), 10+self.tier)
+        pygame.draw.circle(surf, c, (px,py), 10+self.tier)
         if self.slows:
-            pygame.draw.circle(surf, CYAN, (int(self.x),int(self.y)), 12+self.tier,1)
+            pygame.draw.circle(surf, CYAN, (px,py), 12+self.tier,1)
 
         # --- HP bar (show when damaged or recently hit) ---
         if self.hp < self.max_hp or self.hit_timer > 0:
-            px, py = int(self.x), int(self.y)
             w = 26 + self.tier*3   # slight size bump with tier
             h = 4
             ratio = max(0.0, min(1.0, self.hp / self.max_hp))
@@ -352,7 +400,6 @@ class Boss(Enemy):
         if ratio > 0:
             pygame.draw.rect(surf, (210, 110, 240), pygame.Rect(x, y, int(w * ratio), h))
 
-
 class Pickup:
     def __init__(self,pos,type="scrap",amount=1):
         self.x,self.y=pos
@@ -362,11 +409,47 @@ class Pickup:
         self.pulse=0
     def update(self,dt,_):
         self.pulse=(self.pulse+dt)%1.0
-    def draw(self,surf):
+    def draw(self,surf, cam=(0,0)):
         r=6+int(2*math.sin(self.pulse*math.tau))
+        px = int(self.x - cam[0]); py = int(self.y - cam[1])
         color = BLUE if self.type=="core" else GREEN
-        pygame.draw.circle(surf, color, (int(self.x),int(self.y)), r)
-        pygame.draw.circle(surf, WHITE, (int(self.x),int(self.y)), r,1)
+        pygame.draw.circle(surf, color, (px,py), r)
+        pygame.draw.circle(surf, WHITE, (px,py), r,1)
+
+# ----------------------------
+# Floating damage text
+# ----------------------------
+class DamageText:
+    def __init__(self, pos, text, color, is_crit=False):
+        self.x, self.y = pos
+        self.text = text
+        self.color = color
+        self.is_crit = is_crit
+        self.vy = -26 if is_crit else -18
+        self.life = 0.9 if is_crit else 0.7
+        self.max_life = self.life
+        self.vx = random.uniform(-8, 8) if is_crit else random.uniform(-5, 5)
+
+    def update(self, dt):
+        self.life -= dt
+        self.x += self.vx * dt
+        self.y += self.vy * dt
+        self.vx *= (0.95 ** (dt * 60))
+        self.vy *= (0.95 ** (dt * 60))
+
+    def draw(self, surf, cam=(0,0)):
+        if self.life <= 0: return
+        alpha = int(255 * max(0.0, self.life / self.max_life))
+        size = 22 if self.is_crit else 18
+        font = pygame.font.SysFont("consolas", size, bold=self.is_crit)
+        img = font.render(self.text, True, self.color)
+        img.set_alpha(alpha)
+        px = int(self.x - cam[0]); py = int(self.y - cam[1])
+        outline = pygame.font.SysFont("consolas", size, bold=self.is_crit).render(self.text, True, (10,10,12))
+        outline.set_alpha(alpha)
+        surf.blit(outline, (px-1, py-1))
+        surf.blit(outline, (px+1, py+1))
+        surf.blit(img, (px, py))
 
 # ----------------------------
 # Turrets
@@ -374,15 +457,18 @@ class Pickup:
 TURRET_KINDS = {
     "basic": {
         "color": PURPLE, "rate": 0.7, "range": 220, "proj_speed": 420,
-        "damage": 1.0, "dot_dps": 0.0, "dot_dur": 0.0, "slow_factor": 1.0, "slow_dur": 0.0, "bullet_color": YELLOW
+        "damage": 1.0, "dot_dps": 0.0, "dot_dur": 0.0, "slow_factor": 1.0, "slow_dur": 0.0, "bullet_color": YELLOW,
+        "crit_chance": 0.06, "crit_mult": 1.6
     },
     "flame": {
         "color": ORANGE, "rate": 0.45, "range": 180, "proj_speed": 360,
-        "damage": 0.5, "dot_dps": 2.0, "dot_dur": 1.3, "slow_factor": 1.0, "slow_dur": 0.0, "bullet_color": ORANGE
+        "damage": 0.5, "dot_dps": 2.0, "dot_dur": 1.3, "slow_factor": 1.0, "slow_dur": 0.0, "bullet_color": ORANGE,
+        "crit_chance": 0.05, "crit_mult": 1.5
     },
     "ice": {
         "color": CYAN, "rate": 0.9, "range": 240, "proj_speed": 400,
-        "damage": 0.6, "dot_dps": 0.0, "dot_dur": 0.0, "slow_factor": 0.55, "slow_dur": 1.6, "bullet_color": CYAN
+        "damage": 0.6, "dot_dps": 0.0, "dot_dur": 0.0, "slow_factor": 0.55, "slow_dur": 1.6, "bullet_color": CYAN,
+        "crit_chance": 0.07, "crit_mult": 1.5
     }
 }
 
@@ -428,14 +514,18 @@ class Turret:
 
         rng = int(cfg["range"] * (1 + 0.15*lr))
         proj_speed = cfg["proj_speed"] * (1 + 0.05*lr)
-
         rate = cfg["rate"] * (0.88 ** lf)  # lower cooldown per level
+
+        # crit scales a bit with damage upgrades
+        crit_chance = min(0.50, cfg["crit_chance"] + 0.01 * ld)
+        crit_mult   = cfg["crit_mult"] + 0.05 * ld
 
         return {
             "damage": damage, "dot_dps": dot_dps, "dot_dur": dot_dur,
             "slow_factor": slow_factor, "slow_dur": slow_dur,
             "range": rng, "proj_speed": proj_speed, "rate": rate,
-            "color": cfg["color"], "bullet_color": cfg["bullet_color"]
+            "color": cfg["color"], "bullet_color": cfg["bullet_color"],
+            "crit_chance": crit_chance, "crit_mult": crit_mult
         }
 
     def update(self,dt,world):
@@ -449,23 +539,31 @@ class Turret:
             if self.cooldown==0:
                 ang=math.atan2(target.y-self.y, target.x-self.x)
                 vx,vy = math.cos(ang)*st["proj_speed"], math.sin(ang)*st["proj_speed"]
+
+                is_crit = (random.random() < st["crit_chance"])
+                dmg = st["damage"] * (st["crit_mult"] if is_crit else 1.0)
+                bcolor = (255, 90, 220) if is_crit else st["bullet_color"]
+
                 world.bullets.append(
                     Bullet(
                         (self.x,self.y),(vx,vy),
-                        damage=st["damage"], life=1.5,
+                        damage=dmg, life=1.5,
                         dot_dps=st["dot_dps"], dot_dur=st["dot_dur"],
                         slow_factor=st["slow_factor"], slow_dur=st["slow_dur"],
-                        color=st["bullet_color"]
+                        color=bcolor,
+                        crit_chance=0.0,              # disable re-roll
+                        crit_mult=st["crit_mult"],
+                        is_crit=is_crit
                     )
                 )
                 self.cooldown=st["rate"]
 
-    def draw(self,surf):
+    def draw(self,surf, cam=(0,0)):
         st = self.stats()
-        pygame.draw.circle(surf, st["color"],(int(self.x),int(self.y)), 10)
-        pygame.draw.circle(surf, WHITE,(int(self.x),int(self.y)), 10,1)
+        px = int(self.x - cam[0]); py = int(self.y - cam[1])
+        pygame.draw.circle(surf, st["color"],(px,py), 10)
+        pygame.draw.circle(surf, WHITE,(px,py), 10,1)
         # small pips to show upgrade levels (dmg/rng/rate)
-        px,py=int(self.x),int(self.y)
         for i,type in enumerate(("dmg","rng","rate")):
             lvl = self.upgrade_level(type)
             if lvl>0:
@@ -492,6 +590,7 @@ class World:
         self.pickups=[]
         self.bullets=[]
         self.turrets=[]
+        self.floating=[]  # damage popups
         self.active_wave = False
         self.waiting_next_wave = True # start in "waiting" state
         self.say("Press [N] to start Wave 1", 3.0)
@@ -562,19 +661,37 @@ class World:
             e.update(dt,self)
             if e.hp<=0:
                 self.enemies.remove(e)
-                if random.random()<0.85:
-                    self.pickups.append(Pickup((e.x,e.y),"scrap", amount=1))
-                if random.random()<0.18:
-                    self.pickups.append(Pickup((e.x,e.y),"core", amount=1))
+                if isinstance(e, Boss):
+                    # boss bonanza
+                    for _ in range(8):
+                        self.pickups.append(Pickup((e.x + random.uniform(-24,24), e.y + random.uniform(-24,24)), "scrap", amount=1))
+                    for _ in range(5):
+                        self.pickups.append(Pickup((e.x + random.uniform(-24,24), e.y + random.uniform(-24,24)), "core", amount=1))
+                    self.say("Boss defeated! Huge drop!", 3.0)
+                else:
+                    if random.random()<0.85:
+                        self.pickups.append(Pickup((e.x,e.y),"scrap", amount=1))
+                    if random.random()<0.18:
+                        self.pickups.append(Pickup((e.x,e.y),"core", amount=1))
         for b in list(self.bullets):
             b.update(dt,self)
             if b.alive:
                 for e in self.enemies:
                     if dist((b.x,b.y),(e.x,e.y))<12+e.tier and e.alive:
-                        e.hp -= b.damage
+                        # --- use pre-rolled crit flag ---
+                        dmg = b.damage
+                        is_crit = getattr(b, "is_crit", False)
+                        e.hit_timer = 0.18 if is_crit else 0.1
+                        e.hp -= dmg
+
+                        # popup color/style
+                        popup_col = (255, 90, 220) if is_crit else (240, 210, 90)
+                        self.floating.append(DamageText((e.x, e.y - 16 - e.tier*1.5), f"{dmg:.1f}", popup_col, is_crit=is_crit))
+
+                        # status effects unchanged
                         if b.dot_dps>0: e.apply_dot(b.dot_dps, b.dot_dur)
                         if b.slow_factor<1.0: e.apply_slow(b.slow_factor, b.slow_dur)
-                        e.hit_timer=0.1
+
                         b.alive=False
                         break
             if not b.alive:
@@ -585,6 +702,12 @@ class World:
                 self.player.backpack.append(p)
                 self.pickups.remove(p)
         for t in self.turrets: t.update(dt,self)
+
+        # floating damage numbers
+        for dtxt in list(self.floating):
+            dtxt.update(dt)
+            if dtxt.life <= 0:
+                self.floating.remove(dtxt)
 
         if self.active_wave and not self.enemies:
             self.active_wave = False
@@ -646,7 +769,6 @@ class World:
         self.say(f"Wave {self.wave}!", 1.8)
         self.wave += 1
 
-
     def deposit(self):
         if dist((self.player.x,self.player.y),(self.base_cell[0]*TILE+TILE/2, self.base_cell[1]*TILE+TILE/2))<self.deposit_radius:
             scrap= sum(1 for p in self.player.backpack if p.type=="scrap")
@@ -669,7 +791,11 @@ class World:
 
     def buy(self, item):
         p=self.player
-        if item=="speed" and p.scrap>=5:
+        if item=="critical_chance" and p.scrap>=5:
+            p.scrap -= 5
+            p.critical_chance = min(0.50, p.critical_chance + 0.01)  # +1% crit, cap 50%
+            self.say("Critical Chance +1%")
+        elif item=="speed" and p.scrap>=5:
             p.scrap-=5; p.speed*=1.08; self.say("Speed +8%")
         elif item=="damage" and p.scrap>=7:
             p.scrap-=7; p.attack_damage+=0.5; self.say("Damage +0.5")
@@ -706,16 +832,20 @@ class World:
         pygame.draw.circle(screen, (40,60,80), (int(bx),int(by)), self.deposit_radius)
         pygame.draw.circle(screen, (120,140,200), (int(bx),int(by)), self.deposit_radius,2)
 
-        for p in self.pickups: p.draw(screen)
+        for p in self.pickups: p.draw(screen, self.camera)
         for t in self.turrets:
-            t.draw(screen)
+            t.draw(screen, self.camera)
             # If it's the selected upgrade target, show its (upgraded) range
             if t is self.upgrade_target:
                 rng = t.stats()["range"]
                 pygame.draw.circle(screen, (220,220,240), (int(t.x- self.camera[0]), int(t.y- self.camera[1])), rng, 1)
         for e in self.enemies: e.draw(screen, self.camera)
-        for b in self.bullets: b.draw(screen)
+        for b in self.bullets: b.draw(screen, self.camera)
         self.player.draw(screen)
+
+        # floating damage text
+        for dtxt in self.floating:
+            dtxt.draw(screen, self.camera)
 
         if self.upgrade_target:
             overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
@@ -798,11 +928,12 @@ class World:
 
     def draw_shop(self,screen):
         font=pygame.font.SysFont("consolas",18)
-        panel=pygame.Surface((420,320))
+        panel=pygame.Surface((420,344))
         panel.fill((16,22,30))
         pygame.draw.rect(panel,(80,120,160),panel.get_rect(),2)
         lines=[
             "SHOP (on base) — [Esc] to close",
+            "0) +1% Crit Chance ...... 5 scrap",
             "1) +8% Speed ............ 5 scrap",
             "2) +0.5 Damage .......... 7 scrap",
             "3) +10 HP ............... 6 scrap",
@@ -813,11 +944,11 @@ class World:
             "8) Ice Turret (Slow) .... 4 cores",
             "9) Shot Speed +12% ...... 4 scrap",
             "",
-            "Press [1-9] to buy."
+            "Press [0-9] to buy."
         ]
         for i,l in enumerate(lines):
             panel.blit(font.render(l,True,WHITE),(12,12+i*24))
-        screen.blit(panel,(WIDTH-440, HEIGHT-340))
+        screen.blit(panel,(WIDTH-440, HEIGHT-360))
 
     def draw_upgrade_panel(self, screen):
         t = self.upgrade_target
@@ -876,6 +1007,8 @@ class Player:
         self.x,self.y=pos
         # attributes
         self.speed=2.1
+        self.critical_chance = 0.08   # 8% base
+        self.critical_mult   = 1.8    # 1.8x dmg on crit
         self.max_hp=100; self.hp=self.max_hp
         self.attack_damage=1.0
         self.backpack=[]; self.backpack_capacity=5
@@ -921,8 +1054,22 @@ class Player:
             wy = my + self.world.camera[1]
             ang=math.atan2(wy-py, wx-px)
             speed=520
+
+            is_crit = (random.random() < self.critical_chance)
+            dmg = self.attack_damage * (self.critical_mult if is_crit else 1.0)
+            bcolor = (255, 90, 220) if is_crit else YELLOW
+
             self.world.bullets.append(
-                Bullet((px,py),(math.cos(ang)*speed, math.sin(ang)*speed),damage=self.attack_damage, color=YELLOW, playerBullet=True)
+                Bullet(
+                    (px,py),
+                    (math.cos(ang)*speed, math.sin(ang)*speed),
+                    damage=dmg,
+                    color=bcolor,
+                    playerBullet=True,
+                    crit_chance=0.0,              # disable re-roll
+                    crit_mult=self.critical_mult, # for reference
+                    is_crit=is_crit
+                )
             )
             self.shoot_cooldown=self.fire_delay
         for e in list(self.world.enemies):
@@ -1049,9 +1196,6 @@ def main():
     while running:
         dt = clock.tick(FPS) / 1000.0
 
-        fps_text = fps_font.render(f"{int(clock.get_fps())} FPS", True, (255, 255, 255))
-        screen.blit(fps_text, (WIDTH - fps_text.get_width() - 10, 10))
-
         for ev in pygame.event.get():
             if ev.type == pygame.QUIT:
                 running = False
@@ -1075,7 +1219,6 @@ def main():
                             running = False
                     elif ev.key in (pygame.K_ESCAPE,):
                         running = False
-
 
                 elif game_state == "help":
                     if ev.key in (pygame.K_ESCAPE, pygame.K_RETURN, pygame.K_SPACE):
@@ -1155,11 +1298,13 @@ def main():
 
                         # Shop buying (when shop open)
                         elif world.player.in_shop and ev.key in (
+                            pygame.K_0,
                             pygame.K_1, pygame.K_2, pygame.K_3, pygame.K_4,
                             pygame.K_5, pygame.K_6, pygame.K_7, pygame.K_8, 
                             pygame.K_9
                         ):
                             idx = {
+                                pygame.K_0:"critical_chance",
                                 pygame.K_1:"speed", pygame.K_2:"damage", pygame.K_3:"hp",
                                 pygame.K_4:"capacity", pygame.K_5:"turret_basic", pygame.K_6:"basehp",
                                 pygame.K_7:"turret_flame", pygame.K_8:"turret_ice", pygame.K_9:"shotspeed"
@@ -1274,6 +1419,10 @@ def main():
             if help_timer > 0 and world and game_state == "playing":
                 help_timer -= dt
                 screen.blit(helpsurf, (10, HEIGHT - helpsurf.get_height() - 10))
+
+        # draw FPS last so it stays visible
+        fps_text = fps_font.render(f"{int(clock.get_fps())} FPS", True, (255, 255, 255))
+        screen.blit(fps_text, (WIDTH - fps_text.get_width() - 10, 10))
 
         pygame.display.flip()
 
