@@ -22,8 +22,8 @@ SETTINGS_FILE = "settings.json"
 SETTINGS = {
     "show_fps": True,
     "bullet_trails": True,         # placeholder toggle (non-invasive)
-    "damage_numbers": True,      # placeholder toggle (non-invasive)
-    "darkness": 1.0,             # 0.5 – 1.5
+    "damage_numbers": True,        # placeholder toggle (non-invasive)
+    "darkness": 1.0,               # 0.5 – 1.5
 }
 
 def load_settings():
@@ -210,7 +210,7 @@ class Bullet:
         self.is_crit = is_crit
         self.radius = 3
 
-        # --- NEW: simple trail state (so draw() has something to read)
+        # --- simple trail state
         self.trail = []                 # list of (x, y, time_left)
         self.trail_maxlife = 0.25       # seconds a trail puff lives
         self.trail_interval = 0.02      # how often we drop a puff
@@ -223,19 +223,16 @@ class Bullet:
         dx = self.vx*dt; dy = self.vy*dt
         self.x += dx; self.y += dy
 
-        # --- NEW: spawn/fade trail puffs
+        # spawn/fade trail puffs
         self.trail_acc += dt
         if SETTINGS.get("bullet_trails", True):
             while self.trail_acc >= self.trail_interval:
                 self.trail.append((self.x, self.y, self.trail_maxlife))
                 self.trail_acc -= self.trail_interval
-            # decay existing puffs
             self.trail = [(tx, ty, tlife - dt) for (tx, ty, tlife) in self.trail if tlife - dt > 0]
-            # (optional) hard cap so list never explodes
             if len(self.trail) > 64:
                 self.trail = self.trail[-64:]
         else:
-            # if trails are off, keep the list tiny so draw is cheap
             if self.trail:
                 self.trail.clear()
             self.trail_acc = 0.0
@@ -255,7 +252,7 @@ class Bullet:
         if not self.alive: return
         px = int(self.x - cam[0]); py = int(self.y - cam[1])
 
-        # --- trail (alpha circles) — can be disabled in OPTIONS
+        # trail (alpha circles)
         if SETTINGS.get("bullet_trails", True):
             trail_col = (255, 90, 220) if self.is_crit else self.color
             for (tx, ty, tlife) in self.trail:
@@ -266,12 +263,49 @@ class Bullet:
                 pygame.draw.circle(s, (*trail_col, alpha), (ts//2, ts//2), r)
                 surf.blit(s, (int(tx - cam[0]) - r, int(ty - cam[1]) - r))
 
-        # --- core bullet
+        # core bullet
         core_col = (255, 255, 255) if self.is_crit else self.color
         pygame.draw.circle(surf, core_col, (px, py), self.radius)
         if self.is_crit:
             pygame.draw.circle(surf, (255, 90, 220), (px, py), self.radius+2, 1)
 
+# ----------------------------
+# Damage Numbers
+# ----------------------------
+class DamageText:
+    def __init__(self, pos, amount, crit=False):
+        self.x, self.y = pos
+        self.text = str(int(round(amount)))
+        self.life = 0.75
+        self.max_life = 0.75
+        self.vy = -28.0
+        self.vx = random.uniform(-10, 10)
+        self.crit = crit
+        self.alive = True
+        self.scale = 1.2 if crit else 1.0
+
+    def update(self, dt):
+        if not self.alive:
+            return
+        self.life -= dt
+        if self.life <= 0:
+            self.alive = False
+            return
+        self.y += self.vy * dt
+        self.x += self.vx * dt
+        self.vx *= (1.0 - 2.5 * dt)
+
+    def draw(self, surf, cam):
+        if not self.alive:
+            return
+        a = max(0.0, min(1.0, self.life / self.max_life))
+        alpha = int(255 * a)
+        color = (255, 90, 220) if self.crit else (240, 210, 90)
+        font = pygame.font.SysFont("consolas", int(18 * self.scale), bold=self.crit)
+        txt = font.render(self.text, True, color)
+        txt.set_alpha(alpha)
+        px = int(self.x - cam[0]); py = int(self.y - cam[1])
+        surf.blit(txt, (px - txt.get_width() // 2, py - txt.get_height() // 2))
 
 class Enemy:
     def __init__(self,grid_pos, tier=1):
@@ -363,28 +397,25 @@ class Enemy:
 
 class Boss(Enemy):
     def __init__(self, grid_pos, wave_index):
-        # beefy stats; scale a bit with how many 10-wave cycles you’ve reached
         super().__init__(grid_pos, tier=6 + wave_index // 10)
         self.is_boss = True
         self.base_speed = 1.3
         self.max_hp = self.hp = 240 + 40 * (wave_index // 10)
         self.damage = 16 + 4 * (wave_index // 10)
-        self.aura_radius = 96          # hurts player if too close
+        self.aura_radius = 96
         self.aura_dps = 20.0
-        self.minion_timer = 3.5        # spawns minions periodically
+        self.minion_timer = 3.5
         self.minion_cooldown = 3.5
-        self.size = 18                 # visual radius boost
+        self.size = 18
 
     def update(self, dt, world):
         super().update(dt, world)
         if not self.alive:
             return
-        # Aura damage vs player (stay away!)
         if dist((self.x, self.y), (world.player.x, world.player.y)) < self.aura_radius:
             world.player.hp -= self.aura_dps * dt
             if world.player.hp <= 0:
                 world.player.respawn()
-        # Periodic minion spawns near edges around the boss
         self.minion_timer -= dt
         if self.minion_timer <= 0:
             self.minion_timer = self.minion_cooldown
@@ -393,11 +424,10 @@ class Boss(Enemy):
     def spawn_minions(self, world, count=2):
         w, h = len(world.grid), len(world.grid[0])
         gx, gy = int(self.x // TILE), int(self.y // TILE)
-        # try to sprinkle minions in a ring a few cells out
         options = []
         for dx in range(-4, 5):
             for dy in range(-4, 5):
-                if abs(dx) + abs(dy) in (4, 5):  # loose ring
+                if abs(dx) + abs(dy) in (4, 5):
                     x, y = gx + dx, gy + dy
                     if 1 <= x < w-1 and 1 <= y < h-1 and world.grid[x][y] == 0:
                         options.append((x, y))
@@ -410,14 +440,11 @@ class Boss(Enemy):
 
     def draw(self, surf, cam):
         px = int(self.x - cam[0]); py = int(self.y - cam[1])
-        # body
         c = (190, 80, 220) if self.hit_timer <= 0 else (240, 200, 255)
         pygame.draw.circle(surf, c, (px, py), self.size + self.tier)
-        pygame.draw.circle(surf, (255, 220, 90), (px, py), self.size + self.tier + 2, 2)  # “boss ring”
-        # aura indicator (subtle)
+        pygame.draw.circle(surf, (255, 220, 90), (px, py), self.size + self.tier + 2, 2)
         pygame.draw.circle(surf, (180, 80, 80), (px, py), self.aura_radius, 1)
 
-        # HP bar (boss: always show)
         w = 36 + self.tier * 3
         h = 5
         ratio = max(0.0, min(1.0, self.hp / self.max_hp))
@@ -498,7 +525,6 @@ class Turret:
         damage = cfg["damage"] * (1 + 0.25*ld)
         dot_dps = cfg["dot_dps"] * (1 + 0.25*ld)
         dot_dur = cfg["dot_dur"] * (1 + 0.20*ld) if cfg["dot_dur"]>0 else 0.0
-        # For ICE: extend slow duration with dmg upgrades (more control)
         slow_factor = cfg["slow_factor"]
         slow_dur = cfg["slow_dur"] * (1 + 0.20*ld) if cfg["slow_dur"]>0 else 0.0
 
@@ -519,7 +545,6 @@ class Turret:
         if not world.enemies:
             return
         st = self.stats()
-        # target closest within upgraded range
         target=min(world.enemies, key=lambda e: dist((self.x,self.y),(e.x,e.y)))
         if dist((self.x,self.y),(target.x,target.y))<st["range"]:
             if self.cooldown==0:
@@ -568,8 +593,9 @@ class World:
         self.pickups=[]
         self.bullets=[]
         self.turrets=[]
+        self.floaters=[]   # damage numbers
         self.active_wave = False
-        self.waiting_next_wave = True # start in "waiting" state
+        self.waiting_next_wave = True
         self.say("Press [N] to start Wave 1", 3.0)
         self.wave=1
         self.base_hp=100.0
@@ -648,6 +674,11 @@ class World:
                 for e in self.enemies:
                     if dist((b.x,b.y),(e.x,e.y))<12+e.tier and e.alive:
                         e.hp -= b.damage
+                        # spawn damage text
+                        if SETTINGS.get("damage_numbers", True):
+                            self.floaters.append(
+                                DamageText((e.x, e.y - 8), b.damage, crit=getattr(b, "is_crit", False))
+                            )
                         if b.dot_dps>0: e.apply_dot(b.dot_dps, b.dot_dur)
                         if b.slow_factor<1.0: e.apply_slow(b.slow_factor, b.slow_dur)
                         e.hit_timer=0.1
@@ -661,6 +692,12 @@ class World:
                 self.player.backpack.append(p)
                 self.pickups.remove(p)
         for t in self.turrets: t.update(dt,self)
+
+        # update damage texts
+        for f in list(self.floaters):
+            f.update(dt)
+            if not f.alive:
+                self.floaters.remove(f)
 
         if self.active_wave and not self.enemies:
             self.active_wave = False
@@ -677,7 +714,6 @@ class World:
     def spawn_wave(self):
         # boss every 10th wave
         if self.wave % 10 == 0:
-            # place boss at an open edge cell
             for _tries in range(400):
                 x = random.choice([1, GRID_W - 2])
                 y = random.randrange(1, GRID_H - 1)
@@ -687,7 +723,6 @@ class World:
                 if self.grid[x][y] == 0:
                     self.enemies.append(Boss((x, y), self.wave))
                     break
-            # sprinkle a few fewer regulars than normal
             count = max(2, min(2 + self.wave // 2, 10))
             for _ in range(count):
                 for _tries in range(100):
@@ -784,12 +819,16 @@ class World:
         for p in self.pickups: p.draw(screen, self.camera)
         for t in self.turrets:
             t.draw(screen, self.camera)
-            # If it's the selected upgrade target, show its (upgraded) range
             if t is self.upgrade_target:
                 rng = t.stats()["range"]
                 pygame.draw.circle(screen, (220,220,240), (int(t.x- self.camera[0]), int(t.y- self.camera[1])), rng, 1)
         for e in self.enemies: e.draw(screen, self.camera)
         for b in self.bullets: b.draw(screen, self.camera)
+
+        # draw damage numbers
+        for f in self.floaters:
+            f.draw(screen, self.camera)
+
         self.player.draw(screen)
 
         if self.upgrade_target:
@@ -815,7 +854,6 @@ class World:
             col = (max(0,col[0]-80), max(0,col[1]-80), max(0,col[2]-80))
         pygame.draw.circle(screen, col, (int(cx),int(cy)), 12, 2)
         pygame.draw.circle(screen, WHITE, (int(cx),int(cy)), 12, 1)
-        # range ring (base stats preview)
         rng = TURRET_KINDS[ttype]["range"]
         pygame.draw.circle(screen, (200,200,220), (int(cx),int(cy)), rng, 1)
 
@@ -824,7 +862,6 @@ class World:
         px,py = int(self.player.x-self.camera[0]), int(self.player.y-self.camera[1])
         radius = 130 + int(20*self.player.flashlight_level)
 
-        # scale alpha by options slider
         scale = clamp(SETTINGS.get("darkness", 1.0), 0.5, 1.5)
         a_outer = int(180 * scale)
         a_inner = int(90 * scale)
@@ -863,7 +900,6 @@ class World:
             hint = hint_font.render("Press [N] to start the next wave", True, (220, 220, 240))
             screen.blit(hint, (WIDTH//2 - hint.get_width()//2, HEIGHT - 48))
         if boss:
-            # big boss bar across top
             bar_w = WIDTH - 240
             bar_h = 16
             x = (WIDTH - bar_w) // 2
@@ -911,7 +947,6 @@ class World:
         title = f"UPGRADE TURRET [{t.type.upper()}] — scrap:{self.player.scrap}"
         panel.blit(font.render(title, True, WHITE),(12,10))
 
-        # Levels & costs
         def line(lbl, key, y):
             lvl = t.upgrade_level(key)
             cost = t.upgrade_cost(key)
@@ -952,10 +987,8 @@ class World:
 
 class Player:
     def __init__(self, world, pos):
-        # position
         self.world=world
         self.x,self.y=pos
-        # attributes
         self.speed=2.1
         self.critical_chance=0   # %
         self.max_hp=100; self.hp=self.max_hp
@@ -965,9 +998,7 @@ class Player:
         self.fire_delay=0.2
         self.flashlight_level=1
         self.in_shop=False
-        # currency
         self.scrap=0; self.cores=0
-        # turret kits & placement
         self.turret_kits = {"basic":0, "flame":0, "ice":0}
         self.placing_turret = False
         self.placing_type = None
@@ -977,7 +1008,6 @@ class Player:
     def add_turret_kit(self, ttype):
         if ttype not in self.turret_kits: self.turret_kits[ttype]=0
         self.turret_kits[ttype]+=1
-        # enter placement for that type immediately
         self.placing_turret = True
         self.placing_type = ttype
     def cycle_turret_type(self):
@@ -1003,7 +1033,6 @@ class Player:
             wy = my + self.world.camera[1]
             ang=math.atan2(wy-py, wx-px)
             speed=520
-            # --- critical hit roll ---
             is_crit = random.randint(1, 100) <= int(self.critical_chance)
             crit_mod = 2.0 if is_crit else 1.0
             self.world.bullets.append(
@@ -1110,7 +1139,6 @@ def draw_options(surface, selected_idx):
     pygame.draw.rect(panel, (80,120,160), panel.get_rect(), 2)
     font  = pygame.font.SysFont("consolas", 20)
 
-    # Read settings
     show_fps = SETTINGS.get("show_fps", True)
     bullet_trails = SETTINGS.get("bullet_trails", True)
     dmg_numbers = SETTINGS.get("damage_numbers", True)
@@ -1125,9 +1153,8 @@ def draw_options(surface, selected_idx):
         "Use ↑/↓ to move, ←/→ to change, Enter/Esc to go back"
     ]
 
-    # Render lines
     row_y = 16
-    SELECTED_COLOR = (240, 210, 90)   # bright gold/yellow
+    SELECTED_COLOR = (240, 210, 90)
     UNSELECTED_COLOR = (210, 220, 235)
 
     for i, line in enumerate(opt_lines):
@@ -1137,7 +1164,6 @@ def draw_options(surface, selected_idx):
 
     surface.blit(panel, (surface.get_width()//2 - panel.get_width()//2, 230))
 
-    # Back button
     rect = pygame.Rect(surface.get_width()//2 - 140, surface.get_height() - 100, 280, 52)
     mx,my = pygame.mouse.get_pos()
     draw_button(surface, rect, "Back", rect.collidepoint(mx,my))
@@ -1151,7 +1177,6 @@ def main():
 
     load_settings()
 
-    # Size and flags from settings
     WIDTH, HEIGHT = SETTINGS.get("window_size", [1024, 640])
     flags = pygame.FULLSCREEN if SETTINGS.get("fullscreen", False) else 0
 
@@ -1161,7 +1186,6 @@ def main():
     pygame.display.set_caption("Monsters of the Deep — roguelite prototype")
     clock=pygame.time.Clock()
 
-    # Grid size (world stays constant regardless of window size)
     GRID_W, GRID_H = 1024 // TILE, 640 // TILE  # keep original world dimensions
 
     game_state = "menu"  # "menu", "help", "options", "playing", "paused"
@@ -1188,11 +1212,6 @@ def main():
     running=True
     while running:
         dt = clock.tick(FPS) / 1000.0
-
-        # Draw FPS (only if enabled)
-        if SETTINGS.get("show_fps", True):
-            fps_text = fps_font.render(f"{int(clock.get_fps())} FPS", True, (255, 255, 255))
-            screen.blit(fps_text, (WIDTH - fps_text.get_width() - 10, 10))
 
         for ev in pygame.event.get():
             if ev.type == pygame.QUIT:
@@ -1227,16 +1246,15 @@ def main():
                 elif game_state == "options":
                     total_opts = 6  # FPS, trails, dmg nums, darkness, fullscreen, size
                     if ev.key in (pygame.K_ESCAPE, pygame.K_RETURN, pygame.K_SPACE):
-                        # Save whenever you leave options
                         save_settings()
                         game_state = "menu"
                     elif ev.key in (pygame.K_UP, pygame.K_w):
-                        options_index = (options_index - 1) % (total_opts + 1)  # +1 for spacer
-                        if options_index == total_opts:  # skip spacer
+                        options_index = (options_index - 1) % (total_opts + 1)
+                        if options_index == total_opts:
                             options_index = total_opts - 1
                     elif ev.key in (pygame.K_DOWN, pygame.K_s):
                         options_index = (options_index + 1) % (total_opts + 1)
-                        if options_index == total_opts:  # skip spacer
+                        if options_index == total_opts:
                             options_index = 0
                     elif ev.key in (pygame.K_LEFT, pygame.K_a, pygame.K_RIGHT, pygame.K_d):
                         left = ev.key in (pygame.K_LEFT, pygame.K_a)
@@ -1253,20 +1271,9 @@ def main():
                             SETTINGS["fullscreen"] = not SETTINGS.get("fullscreen", False)
                             flags = pygame.FULLSCREEN if SETTINGS["fullscreen"] else 0
                             screen = pygame.display.set_mode((WIDTH, HEIGHT), flags)
-                        #elif options_index == 5:
-                        #    sizes = [(1024, 640), (1280, 720), (1600, 900), (1920, 1080)]
-                        #    cur_tuple = tuple(SETTINGS.get("window_size", [1024, 640]))
-                        #    cur = sizes.index(cur_tuple) if cur_tuple in sizes else 0
-                        #    cur = (cur - 1) % len(sizes) if left else (cur + 1) % len(sizes)
-                        #    SETTINGS["window_size"] = list(sizes[cur])
-                        #    WIDTH, HEIGHT = SETTINGS["window_size"]
-                        #    if not SETTINGS.get("fullscreen", False):
-                        #        screen = pygame.display.set_mode((WIDTH, HEIGHT))
-                        # persist after each change
                         save_settings()
 
                 elif game_state == "playing":
-                    # Esc / P: close shop or upgrade, or cancel placement, or pause
                     if ev.key in (pygame.K_ESCAPE, pygame.K_p):
                         if world.player.in_shop:
                             world.player.in_shop = False
@@ -1291,7 +1298,6 @@ def main():
                             world = World()
 
                         elif ev.key == pygame.K_c:
-                            # Cheat Key
                             world.player.scrap+=15
                             world.player.cores+=10
                             for k in world.player.turret_kits:
@@ -1301,7 +1307,6 @@ def main():
                             world.wave+=1
 
                         elif ev.key == pygame.K_b:
-                            # Toggle shop when on the base
                             if world.player.in_shop:
                                 world.player.in_shop = False
                             else:
@@ -1324,7 +1329,6 @@ def main():
                             world.player.cycle_turret_type()
 
                         elif ev.key == pygame.K_u and (not world.player.in_shop):
-                            # open upgrade panel for turret under cursor if close enough
                             mx,my = pygame.mouse.get_pos()
                             wx = mx + world.camera[0]
                             wy = my + world.camera[1]
@@ -1337,7 +1341,6 @@ def main():
                             else:
                                 world.say("No turret under cursor")
 
-                        # Shop buying (when shop open)
                         elif world.player.in_shop and ev.key in (
                             pygame.K_1, pygame.K_2, pygame.K_3, pygame.K_4,
                             pygame.K_5, pygame.K_6, pygame.K_7, pygame.K_8, 
@@ -1350,7 +1353,6 @@ def main():
                             }[ev.key]
                             world.buy(idx)
 
-                        # Upgrade purchases (when upgrade panel open)
                         elif world.upgrade_target and ev.key in (pygame.K_1, pygame.K_2, pygame.K_3):
                             kmap = {pygame.K_1:"dmg", pygame.K_2:"rng", pygame.K_3:"rate"}
                             world.upgrade_buy(kmap[ev.key])
@@ -1411,9 +1413,8 @@ def main():
                                 running = False
                             break
                 elif game_state == "playing" and world:
-                    # turret placement clicks
                     if world.player.placing_turret:
-                        if ev.button == 1:  # left click: attempt place
+                        if ev.button == 1:
                             wx = mx + world.camera[0]
                             wy = my + world.camera[1]
                             gx, gy = int(wx//TILE), int(wy//TILE)
@@ -1430,12 +1431,10 @@ def main():
                                 world.say(f"{ttype.capitalize()} turret placed")
                             else:
                                 world.say("Can't place there")
-                        elif ev.button == 3:  # right click: cancel placement
+                        elif ev.button == 3:
                             world.player.placing_turret = False
                             world.say("Turret placement cancelled")
-                    # click outside to close upgrade panel
                     elif world.upgrade_target and ev.button==1:
-                        # close if you click far from the panel and not on target turret
                         wx = mx + world.camera[0]; wy = my + world.camera[1]
                         if dist((wx,wy),(world.upgrade_target.x, world.upgrade_target.y))>80:
                             world.upgrade_target=None
@@ -1447,7 +1446,7 @@ def main():
             and world
             and (not world.player.in_shop)
             and world.base_hp > 0
-            and (world.upgrade_target is None)  # <-- pause game logic during upgrade menu
+            and (world.upgrade_target is None)
         ):
             world.update(dt)
 
@@ -1469,6 +1468,11 @@ def main():
             if help_timer > 0 and world and game_state == "playing":
                 help_timer -= dt
                 screen.blit(helpsurf, (10, HEIGHT - helpsurf.get_height() - 10))
+
+        # Draw FPS last so it remains visible
+        if SETTINGS.get("show_fps", True):
+            fps_text = fps_font.render(f"{int(clock.get_fps())} FPS", True, (255, 255, 255))
+            screen.blit(fps_text, (WIDTH - fps_text.get_width() - 10, 10))
 
         pygame.display.flip()
 
