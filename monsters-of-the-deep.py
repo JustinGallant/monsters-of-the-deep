@@ -1,19 +1,47 @@
-import pygame, random, math, time
+import pygame, random, math, time, json, os
 from collections import deque
 
 # ----------------------------
-# Config
+# Config (grid/world constants)
 # ----------------------------
-WIDTH, HEIGHT = 1024, 640
 TILE = 32
+WIDTH, HEIGHT = 1024, 640
 GRID_W, GRID_H = WIDTH // TILE, HEIGHT // TILE
-
-FPS = 60
 
 # Colors
 WHITE=(255,255,255); BLACK=(0,0,0); GREY=(60,60,60)
 GREEN=(80,210,120); RED=(220,70,70); YELLOW=(240,210,90); BLUE=(80,160,240); PURPLE=(170,90,210)
 ORANGE=(240,140,60); CYAN=(120,210,230)
+
+FPS = 60
+
+# ----------------------------
+# Settings (persisted to settings.json)
+# ----------------------------
+SETTINGS_FILE = "settings.json"
+SETTINGS = {
+    "show_fps": True,
+    "bullet_trails": True,         # placeholder toggle (non-invasive)
+    "damage_numbers": True,      # placeholder toggle (non-invasive)
+    "darkness": 1.0,             # 0.5 – 1.5
+}
+
+def load_settings():
+    if os.path.exists(SETTINGS_FILE):
+        try:
+            with open(SETTINGS_FILE, "r") as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    SETTINGS.update(data)
+        except Exception as e:
+            print("Failed to load settings:", e)
+
+def save_settings():
+    try:
+        with open(SETTINGS_FILE, "w") as f:
+            json.dump(SETTINGS, f, indent=2)
+    except Exception as e:
+        print("Failed to save settings:", e)
 
 # ----------------------------
 # Helper math
@@ -166,11 +194,8 @@ def bfs_next_step(grid, start, goal):
 # Entities
 # ----------------------------
 class Bullet:
-    def __init__(self, pos, vel, damage=1, life=1.5,
-                 dot_dps=0, dot_dur=0, slow_factor=1.0, slow_dur=0,
-                 color=YELLOW, playerBullet=False,
-                 crit_chance=0.0, crit_mult=1.5,
-                 is_crit=False):
+    def __init__(self, pos, vel, damage=1, life=1.5, dot_dps=0, dot_dur=0,
+                 slow_factor=1.0, slow_dur=0, color=YELLOW, playerBullet=False, is_crit=False):
         self.x,self.y = pos
         self.vx,self.vy = vel
         self.damage=damage
@@ -182,67 +207,71 @@ class Bullet:
         self.slow_dur = slow_dur
         self.color = color
         self.playerBullet=playerBullet
+        self.is_crit = is_crit
+        self.radius = 3
 
-        # --- crit (pre-rolled) ---
-        self.is_crit = bool(is_crit)
-        # disable re-roll on hit; we use pre-roll flag
-        self.crit_chance = 0.0
-        self.crit_mult   = crit_mult
+        # --- NEW: simple trail state (so draw() has something to read)
+        self.trail = []                 # list of (x, y, time_left)
+        self.trail_maxlife = 0.25       # seconds a trail puff lives
+        self.trail_interval = 0.02      # how often we drop a puff
+        self.trail_acc = 0.0            # accumulator for interval timing
 
-        # --- visuals ---
-        self.base_radius = 3
-        self.radius = self.base_radius + (2 if self.is_crit else 0)
-
-        # trail: a few fading points behind the bullet
-        self.trail_maxlife = 0.35 if self.is_crit else 0.25
-        self.trail = deque(maxlen=16 if self.is_crit else 10)
-
-    def update(self,dt,world):
+    def update(self, dt, world):
         if not self.alive: return
 
-        # leave a breadcrumb
-        self.trail.append([self.x, self.y, self.trail_maxlife])
+        # movement
+        dx = self.vx*dt; dy = self.vy*dt
+        self.x += dx; self.y += dy
 
-        self.x += self.vx*dt
-        self.y += self.vy*dt
+        # --- NEW: spawn/fade trail puffs
+        self.trail_acc += dt
+        if SETTINGS.get("bullet_trails", True):
+            while self.trail_acc >= self.trail_interval:
+                self.trail.append((self.x, self.y, self.trail_maxlife))
+                self.trail_acc -= self.trail_interval
+            # decay existing puffs
+            self.trail = [(tx, ty, tlife - dt) for (tx, ty, tlife) in self.trail if tlife - dt > 0]
+            # (optional) hard cap so list never explodes
+            if len(self.trail) > 64:
+                self.trail = self.trail[-64:]
+        else:
+            # if trails are off, keep the list tiny so draw is cheap
+            if self.trail:
+                self.trail.clear()
+            self.trail_acc = 0.0
 
-        # age out
+        # lifetime
         self.life -= dt
         if self.life <= 0:
             self.alive = False
 
-        # fade trail
-        for seg in list(self.trail):
-            seg[2] -= dt
-            if seg[2] <= 0:
-                try: self.trail.remove(seg)
-                except ValueError: pass
-
-        # player bullets stop at walls
+        # collide with walls if it's a player bullet
         if self.alive and self.playerBullet:
             gx,gy=int(self.x//TILE), int(self.y//TILE)
             if world.is_solid(gx,gy):
                 self.alive=False
 
-    def draw(self,surf, cam=(0,0)):
+    def draw(self, surf, cam=(0,0)):
         if not self.alive: return
         px = int(self.x - cam[0]); py = int(self.y - cam[1])
 
-        # --- trail (alpha circles on small SRCALPHA surfaces)
-        trail_col = (255, 90, 220) if self.is_crit else self.color
-        for (tx, ty, tlife) in self.trail:
-            alpha = int(180 * max(0.0, tlife / self.trail_maxlife))
-            r = max(1, int(self.radius * (0.6 + 0.4 * (tlife / self.trail_maxlife))))
-            ts = r*2 + 2
-            s = pygame.Surface((ts, ts), pygame.SRCALPHA)
-            pygame.draw.circle(s, (*trail_col, alpha), (ts//2, ts//2), r)
-            surf.blit(s, (int(tx - cam[0]) - r, int(ty - cam[1]) - r))
+        # --- trail (alpha circles) — can be disabled in OPTIONS
+        if SETTINGS.get("bullet_trails", True):
+            trail_col = (255, 90, 220) if self.is_crit else self.color
+            for (tx, ty, tlife) in self.trail:
+                alpha = int(180 * max(0.0, tlife / self.trail_maxlife))
+                r = max(1, int(self.radius * (0.6 + 0.4 * (tlife / self.trail_maxlife))))
+                ts = r*2 + 2
+                s = pygame.Surface((ts, ts), pygame.SRCALPHA)
+                pygame.draw.circle(s, (*trail_col, alpha), (ts//2, ts//2), r)
+                surf.blit(s, (int(tx - cam[0]) - r, int(ty - cam[1]) - r))
 
         # --- core bullet
         core_col = (255, 255, 255) if self.is_crit else self.color
         pygame.draw.circle(surf, core_col, (px, py), self.radius)
         if self.is_crit:
-            pygame.draw.circle(surf, (255, 90, 220), (px, py), self.radius+2, 1)  # ring for crits
+            pygame.draw.circle(surf, (255, 90, 220), (px, py), self.radius+2, 1)
+
 
 class Enemy:
     def __init__(self,grid_pos, tier=1):
@@ -311,13 +340,12 @@ class Enemy:
             self.gx,self.gy=int(self.x//TILE), int(self.y//TILE)
         if (self.gx,self.gy)==world.base_cell:
             world.base_hp = max(0, world.base_hp - self.damage*dt)
-
     def draw(self,surf,cam):
-        px = int(self.x - cam[0]); py = int(self.y - cam[1])
+        px, py = int(self.x - cam[0]), int(self.y - cam[1])
         c = (200,60,60) if self.hit_timer<=0 else (255,200,200)
-        pygame.draw.circle(surf, c, (px,py), 10+self.tier)
+        pygame.draw.circle(surf, c, (px, py), 10+self.tier)
         if self.slows:
-            pygame.draw.circle(surf, CYAN, (px,py), 12+self.tier,1)
+            pygame.draw.circle(surf, CYAN, (px, py), 12+self.tier,1)
 
         # --- HP bar (show when damaged or recently hit) ---
         if self.hp < self.max_hp or self.hit_timer > 0:
@@ -409,47 +437,12 @@ class Pickup:
         self.pulse=0
     def update(self,dt,_):
         self.pulse=(self.pulse+dt)%1.0
-    def draw(self,surf, cam=(0,0)):
+    def draw(self,surf, cam):
         r=6+int(2*math.sin(self.pulse*math.tau))
-        px = int(self.x - cam[0]); py = int(self.y - cam[1])
         color = BLUE if self.type=="core" else GREEN
+        px, py = int(self.x - cam[0]), int(self.y - cam[1])
         pygame.draw.circle(surf, color, (px,py), r)
         pygame.draw.circle(surf, WHITE, (px,py), r,1)
-
-# ----------------------------
-# Floating damage text
-# ----------------------------
-class DamageText:
-    def __init__(self, pos, text, color, is_crit=False):
-        self.x, self.y = pos
-        self.text = text
-        self.color = color
-        self.is_crit = is_crit
-        self.vy = -26 if is_crit else -18
-        self.life = 0.9 if is_crit else 0.7
-        self.max_life = self.life
-        self.vx = random.uniform(-8, 8) if is_crit else random.uniform(-5, 5)
-
-    def update(self, dt):
-        self.life -= dt
-        self.x += self.vx * dt
-        self.y += self.vy * dt
-        self.vx *= (0.95 ** (dt * 60))
-        self.vy *= (0.95 ** (dt * 60))
-
-    def draw(self, surf, cam=(0,0)):
-        if self.life <= 0: return
-        alpha = int(255 * max(0.0, self.life / self.max_life))
-        size = 22 if self.is_crit else 18
-        font = pygame.font.SysFont("consolas", size, bold=self.is_crit)
-        img = font.render(self.text, True, self.color)
-        img.set_alpha(alpha)
-        px = int(self.x - cam[0]); py = int(self.y - cam[1])
-        outline = pygame.font.SysFont("consolas", size, bold=self.is_crit).render(self.text, True, (10,10,12))
-        outline.set_alpha(alpha)
-        surf.blit(outline, (px-1, py-1))
-        surf.blit(outline, (px+1, py+1))
-        surf.blit(img, (px, py))
 
 # ----------------------------
 # Turrets
@@ -457,18 +450,15 @@ class DamageText:
 TURRET_KINDS = {
     "basic": {
         "color": PURPLE, "rate": 0.7, "range": 220, "proj_speed": 420,
-        "damage": 1.0, "dot_dps": 0.0, "dot_dur": 0.0, "slow_factor": 1.0, "slow_dur": 0.0, "bullet_color": YELLOW,
-        "crit_chance": 0.06, "crit_mult": 1.6
+        "damage": 1.0, "dot_dps": 0.0, "dot_dur": 0.0, "slow_factor": 1.0, "slow_dur": 0.0, "bullet_color": YELLOW
     },
     "flame": {
         "color": ORANGE, "rate": 0.45, "range": 180, "proj_speed": 360,
-        "damage": 0.5, "dot_dps": 2.0, "dot_dur": 1.3, "slow_factor": 1.0, "slow_dur": 0.0, "bullet_color": ORANGE,
-        "crit_chance": 0.05, "crit_mult": 1.5
+        "damage": 0.5, "dot_dps": 2.0, "dot_dur": 1.3, "slow_factor": 1.0, "slow_dur": 0.0, "bullet_color": ORANGE
     },
     "ice": {
         "color": CYAN, "rate": 0.9, "range": 240, "proj_speed": 400,
-        "damage": 0.6, "dot_dps": 0.0, "dot_dur": 0.0, "slow_factor": 0.55, "slow_dur": 1.6, "bullet_color": CYAN,
-        "crit_chance": 0.07, "crit_mult": 1.5
+        "damage": 0.6, "dot_dps": 0.0, "dot_dur": 0.0, "slow_factor": 0.55, "slow_dur": 1.6, "bullet_color": CYAN
     }
 }
 
@@ -483,17 +473,17 @@ class Turret:
         self.upgrades = {"dmg":0, "rng":0, "rate":0}  # per-turret levels
 
     # ----- Upgrade economics -----
-    def upgrade_level(self, type): return self.upgrades.get(type,0)
-    def can_upgrade(self, type): return self.upgrade_level(type) < MAX_UPGRADE
-    def upgrade_cost(self, type):
-        lvl = self.upgrade_level(type)
-        base = {"dmg":6, "rng":5, "rate":7}[type]
-        step = {"dmg":2, "rng":2, "rate":3}[type]
+    def upgrade_level(self, key): return self.upgrades.get(key,0)
+    def can_upgrade(self, key): return self.upgrade_level(key) < MAX_UPGRADE
+    def upgrade_cost(self, key):
+        lvl = self.upgrade_level(key)
+        base = {"dmg":6, "rng":5, "rate":7}[key]
+        step = {"dmg":2, "rng":2, "rate":3}[key]
         return base + step*lvl
 
-    def apply_upgrade(self, type):
-        if self.can_upgrade(type):
-            self.upgrades[type] += 1
+    def apply_upgrade(self, key):
+        if self.can_upgrade(key):
+            self.upgrades[key] += 1
 
     # ----- Stats w/ upgrade scaling -----
     def base_cfg(self):
@@ -514,18 +504,14 @@ class Turret:
 
         rng = int(cfg["range"] * (1 + 0.15*lr))
         proj_speed = cfg["proj_speed"] * (1 + 0.05*lr)
-        rate = cfg["rate"] * (0.88 ** lf)  # lower cooldown per level
 
-        # crit scales a bit with damage upgrades
-        crit_chance = min(0.50, cfg["crit_chance"] + 0.01 * ld)
-        crit_mult   = cfg["crit_mult"] + 0.05 * ld
+        rate = cfg["rate"] * (0.88 ** lf)  # lower cooldown per level
 
         return {
             "damage": damage, "dot_dps": dot_dps, "dot_dur": dot_dur,
             "slow_factor": slow_factor, "slow_dur": slow_dur,
             "range": rng, "proj_speed": proj_speed, "rate": rate,
-            "color": cfg["color"], "bullet_color": cfg["bullet_color"],
-            "crit_chance": crit_chance, "crit_mult": crit_mult
+            "color": cfg["color"], "bullet_color": cfg["bullet_color"]
         }
 
     def update(self,dt,world):
@@ -539,33 +525,25 @@ class Turret:
             if self.cooldown==0:
                 ang=math.atan2(target.y-self.y, target.x-self.x)
                 vx,vy = math.cos(ang)*st["proj_speed"], math.sin(ang)*st["proj_speed"]
-
-                is_crit = (random.random() < st["crit_chance"])
-                dmg = st["damage"] * (st["crit_mult"] if is_crit else 1.0)
-                bcolor = (255, 90, 220) if is_crit else st["bullet_color"]
-
                 world.bullets.append(
                     Bullet(
                         (self.x,self.y),(vx,vy),
-                        damage=dmg, life=1.5,
+                        damage=st["damage"], life=1.5,
                         dot_dps=st["dot_dps"], dot_dur=st["dot_dur"],
                         slow_factor=st["slow_factor"], slow_dur=st["slow_dur"],
-                        color=bcolor,
-                        crit_chance=0.0,              # disable re-roll
-                        crit_mult=st["crit_mult"],
-                        is_crit=is_crit
+                        color=st["bullet_color"]
                     )
                 )
                 self.cooldown=st["rate"]
 
-    def draw(self,surf, cam=(0,0)):
+    def draw(self,surf, cam):
         st = self.stats()
-        px = int(self.x - cam[0]); py = int(self.y - cam[1])
+        px, py = int(self.x - cam[0]), int(self.y - cam[1])
         pygame.draw.circle(surf, st["color"],(px,py), 10)
         pygame.draw.circle(surf, WHITE,(px,py), 10,1)
         # small pips to show upgrade levels (dmg/rng/rate)
-        for i,type in enumerate(("dmg","rng","rate")):
-            lvl = self.upgrade_level(type)
+        for i,key in enumerate(("dmg","rng","rate")):
+            lvl = self.upgrade_level(key)
             if lvl>0:
                 pygame.draw.rect(surf, WHITE, pygame.Rect(px-12+i*8, py+12, 6, 4))
                 if lvl>1:
@@ -590,7 +568,6 @@ class World:
         self.pickups=[]
         self.bullets=[]
         self.turrets=[]
-        self.floating=[]  # damage popups
         self.active_wave = False
         self.waiting_next_wave = True # start in "waiting" state
         self.say("Press [N] to start Wave 1", 3.0)
@@ -639,19 +616,19 @@ class World:
                 best=t; bestd=d
         return best
 
-    def upgrade_buy(self, type):
+    def upgrade_buy(self, key):
         t = self.upgrade_target
         if not t: return
-        if not t.can_upgrade(type):
+        if not t.can_upgrade(key):
             self.say("Already at max level")
             return
-        cost = t.upgrade_cost(type)
+        cost = t.upgrade_cost(key)
         if self.player.scrap < cost:
             self.say(f"Need {cost} scrap")
             return
         self.player.scrap -= cost
-        t.apply_upgrade(type)
-        self.say(f"Upgraded {type.upper()} to L{t.upgrade_level(type)}")
+        t.apply_upgrade(key)
+        self.say(f"Upgraded {key.upper()} to L{t.upgrade_level(key)}")
 
     def update(self,dt):
         self.message_timer=max(0,self.message_timer-dt)
@@ -661,37 +638,19 @@ class World:
             e.update(dt,self)
             if e.hp<=0:
                 self.enemies.remove(e)
-                if isinstance(e, Boss):
-                    # boss bonanza
-                    for _ in range(8):
-                        self.pickups.append(Pickup((e.x + random.uniform(-24,24), e.y + random.uniform(-24,24)), "scrap", amount=1))
-                    for _ in range(5):
-                        self.pickups.append(Pickup((e.x + random.uniform(-24,24), e.y + random.uniform(-24,24)), "core", amount=1))
-                    self.say("Boss defeated! Huge drop!", 3.0)
-                else:
-                    if random.random()<0.85:
-                        self.pickups.append(Pickup((e.x,e.y),"scrap", amount=1))
-                    if random.random()<0.18:
-                        self.pickups.append(Pickup((e.x,e.y),"core", amount=1))
+                if random.random()<0.85:
+                    self.pickups.append(Pickup((e.x,e.y),"scrap", amount=1))
+                if random.random()<0.18:
+                    self.pickups.append(Pickup((e.x,e.y),"core", amount=1))
         for b in list(self.bullets):
             b.update(dt,self)
             if b.alive:
                 for e in self.enemies:
                     if dist((b.x,b.y),(e.x,e.y))<12+e.tier and e.alive:
-                        # --- use pre-rolled crit flag ---
-                        dmg = b.damage
-                        is_crit = getattr(b, "is_crit", False)
-                        e.hit_timer = 0.18 if is_crit else 0.1
-                        e.hp -= dmg
-
-                        # popup color/style
-                        popup_col = (255, 90, 220) if is_crit else (240, 210, 90)
-                        self.floating.append(DamageText((e.x, e.y - 16 - e.tier*1.5), f"{dmg:.1f}", popup_col, is_crit=is_crit))
-
-                        # status effects unchanged
+                        e.hp -= b.damage
                         if b.dot_dps>0: e.apply_dot(b.dot_dps, b.dot_dur)
                         if b.slow_factor<1.0: e.apply_slow(b.slow_factor, b.slow_dur)
-
+                        e.hit_timer=0.1
                         b.alive=False
                         break
             if not b.alive:
@@ -702,12 +661,6 @@ class World:
                 self.player.backpack.append(p)
                 self.pickups.remove(p)
         for t in self.turrets: t.update(dt,self)
-
-        # floating damage numbers
-        for dtxt in list(self.floating):
-            dtxt.update(dt)
-            if dtxt.life <= 0:
-                self.floating.remove(dtxt)
 
         if self.active_wave and not self.enemies:
             self.active_wave = False
@@ -792,11 +745,7 @@ class World:
     def buy(self, item):
         p=self.player
         if item=="critical_chance" and p.scrap>=5:
-            p.scrap -= 5
-            p.critical_chance = min(0.50, p.critical_chance + 0.01)  # +1% crit, cap 50%
-            self.say("Critical Chance +1%")
-        elif item=="speed" and p.scrap>=5:
-            p.scrap-=5; p.speed*=1.08; self.say("Speed +8%")
+            p.scrap-=5; p.critical_chance+=1; self.say("Critical Chance +1%")
         elif item=="damage" and p.scrap>=7:
             p.scrap-=7; p.attack_damage+=0.5; self.say("Damage +0.5")
         elif item=="hp" and p.scrap>=6:
@@ -843,10 +792,6 @@ class World:
         for b in self.bullets: b.draw(screen, self.camera)
         self.player.draw(screen)
 
-        # floating damage text
-        for dtxt in self.floating:
-            dtxt.draw(screen, self.camera)
-
         if self.upgrade_target:
             overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
             overlay.fill((0, 0, 0, 120))
@@ -878,7 +823,13 @@ class World:
         dark = pygame.Surface((WIDTH,HEIGHT), pygame.SRCALPHA)
         px,py = int(self.player.x-self.camera[0]), int(self.player.y-self.camera[1])
         radius = 130 + int(20*self.player.flashlight_level)
-        for r,alpha in [(radius,180),(radius//2,90)]:
+
+        # scale alpha by options slider
+        scale = clamp(SETTINGS.get("darkness", 1.0), 0.5, 1.5)
+        a_outer = int(180 * scale)
+        a_inner = int(90 * scale)
+
+        for r,alpha in [(radius, a_outer),(radius//2, a_inner)]:
             pygame.draw.circle(dark,(0,0,0,alpha),(px,py),r)
         pygame.draw.circle(dark,(0,0,0,0),(px,py), int(radius*0.6))
         screen.blit(dark,(0,0), special_flags=pygame.BLEND_RGBA_SUB)
@@ -928,12 +879,11 @@ class World:
 
     def draw_shop(self,screen):
         font=pygame.font.SysFont("consolas",18)
-        panel=pygame.Surface((420,344))
+        panel=pygame.Surface((420,320))
         panel.fill((16,22,30))
         pygame.draw.rect(panel,(80,120,160),panel.get_rect(),2)
         lines=[
             "SHOP (on base) — [Esc] to close",
-            "0) +1% Crit Chance ...... 5 scrap",
             "1) +8% Speed ............ 5 scrap",
             "2) +0.5 Damage .......... 7 scrap",
             "3) +10 HP ............... 6 scrap",
@@ -944,11 +894,11 @@ class World:
             "8) Ice Turret (Slow) .... 4 cores",
             "9) Shot Speed +12% ...... 4 scrap",
             "",
-            "Press [0-9] to buy."
+            "Press [1-9] to buy."
         ]
         for i,l in enumerate(lines):
             panel.blit(font.render(l,True,WHITE),(12,12+i*24))
-        screen.blit(panel,(WIDTH-440, HEIGHT-360))
+        screen.blit(panel,(WIDTH-440, HEIGHT-340))
 
     def draw_upgrade_panel(self, screen):
         t = self.upgrade_target
@@ -985,7 +935,7 @@ class World:
         title_font = pygame.font.SysFont("consolas", 36, bold=True)
         title = title_font.render("PAUSED", True, (255, 255, 255))
         screen.blit(title, (WIDTH//2 - title.get_width()//2, HEIGHT//2 - 200))
-        labels = ["Resume", "Restart", "Main Menu", "Quit"]
+        labels = ["Resume", "Options", "Restart", "Main Menu", "Quit"]
         btn_w, btn_h = 320, 56
         spacing = 72
         start_y = HEIGHT//2 - 80
@@ -1007,8 +957,7 @@ class Player:
         self.x,self.y=pos
         # attributes
         self.speed=2.1
-        self.critical_chance = 0.08   # 8% base
-        self.critical_mult   = 1.8    # 1.8x dmg on crit
+        self.critical_chance=0   # %
         self.max_hp=100; self.hp=self.max_hp
         self.attack_damage=1.0
         self.backpack=[]; self.backpack_capacity=5
@@ -1054,22 +1003,12 @@ class Player:
             wy = my + self.world.camera[1]
             ang=math.atan2(wy-py, wx-px)
             speed=520
-
-            is_crit = (random.random() < self.critical_chance)
-            dmg = self.attack_damage * (self.critical_mult if is_crit else 1.0)
-            bcolor = (255, 90, 220) if is_crit else YELLOW
-
+            # --- critical hit roll ---
+            is_crit = random.randint(1, 100) <= int(self.critical_chance)
+            crit_mod = 2.0 if is_crit else 1.0
             self.world.bullets.append(
-                Bullet(
-                    (px,py),
-                    (math.cos(ang)*speed, math.sin(ang)*speed),
-                    damage=dmg,
-                    color=bcolor,
-                    playerBullet=True,
-                    crit_chance=0.0,              # disable re-roll
-                    crit_mult=self.critical_mult, # for reference
-                    is_crit=is_crit
-                )
+                Bullet((px,py),(math.cos(ang)*speed, math.sin(ang)*speed),
+                       damage=self.attack_damage*crit_mod, color=YELLOW, playerBullet=True, is_crit=is_crit)
             )
             self.shoot_cooldown=self.fire_delay
         for e in list(self.world.enemies):
@@ -1114,10 +1053,10 @@ def draw_title(surface, title, subtitle=None):
     big = pygame.font.SysFont("consolas", 40, bold=True)
     sub = pygame.font.SysFont("consolas", 20)
     t = big.render(title, True, (200,220,255))
-    surface.blit(t, (WIDTH//2 - t.get_width()//2, 120))
+    surface.blit(t, (surface.get_width()//2 - t.get_width()//2, 120))
     if subtitle:
         s = sub.render(subtitle, True, (180, 190, 210))
-        surface.blit(s, (WIDTH//2 - s.get_width()//2, 170))
+        surface.blit(s, (surface.get_width()//2 - s.get_width()//2, 170))
 
 def draw_main_menu(surface, items, hovered_index):
     draw_title(surface, "MONSTERS OF THE DEEP", "tiny roguelite prototype")
@@ -1127,13 +1066,13 @@ def draw_main_menu(surface, items, hovered_index):
     mx,my = pygame.mouse.get_pos()
     rects=[]
     for i, label in enumerate(items):
-        rect = pygame.Rect(WIDTH//2 - btn_w//2, start_y + i*spacing, btn_w, btn_h)
+        rect = pygame.Rect(surface.get_width()//2 - btn_w//2, start_y + i*spacing, btn_w, btn_h)
         rects.append(rect)
         hovered = rect.collidepoint(mx,my) or (hovered_index == i)
         draw_button(surface, rect, label, hovered)
     tiny = pygame.font.SysFont("consolas", 16)
     hint = tiny.render("W/S or ↑/↓ to navigate • Enter/Space to select • Mouse supported", True, (160,170,190))
-    surface.blit(hint, (WIDTH//2 - hint.get_width()//2, HEIGHT-60))
+    surface.blit(hint, (surface.get_width()//2 - hint.get_width()//2, surface.get_height()-60))
     return rects
 
 def draw_help(surface):
@@ -1156,8 +1095,50 @@ def draw_help(surface):
     ]
     for i,l in enumerate(lines):
         panel.blit(font.render(l, True, WHITE), (16, 16 + i*32))
-    surface.blit(panel, (WIDTH//2 - panel.get_width()//2, 230))
-    rect = pygame.Rect(WIDTH//2 - 140, HEIGHT - 100, 280, 52)
+    surface.blit(panel, (surface.get_width()//2 - panel.get_width()//2, 230))
+    rect = pygame.Rect(surface.get_width()//2 - 140, surface.get_height() - 100, 280, 52)
+    mx,my = pygame.mouse.get_pos()
+    draw_button(surface, rect, "Back", rect.collidepoint(mx,my))
+    return rect
+
+def format_bool(b): return "On" if b else "Off"
+
+def draw_options(surface, selected_idx):
+    draw_title(surface, "OPTIONS")
+    panel = pygame.Surface((680, 392))
+    panel.fill((16,22,30))
+    pygame.draw.rect(panel, (80,120,160), panel.get_rect(), 2)
+    font  = pygame.font.SysFont("consolas", 20)
+
+    # Read settings
+    show_fps = SETTINGS.get("show_fps", True)
+    bullet_trails = SETTINGS.get("bullet_trails", True)
+    dmg_numbers = SETTINGS.get("damage_numbers", True)
+    darkness = SETTINGS.get("darkness", 1.0)
+
+    opt_lines = [
+        f"Show FPS ............. {format_bool(show_fps)}",
+        f"Bullet Trails ........ {format_bool(bullet_trails)}",
+        f"Damage Numbers ....... {format_bool(dmg_numbers)}",
+        f"Darkness Intensity ... {darkness:.1f}",
+        "",
+        "Use ↑/↓ to move, ←/→ to change, Enter/Esc to go back"
+    ]
+
+    # Render lines
+    row_y = 16
+    SELECTED_COLOR = (240, 210, 90)   # bright gold/yellow
+    UNSELECTED_COLOR = (210, 220, 235)
+
+    for i, line in enumerate(opt_lines):
+        color = SELECTED_COLOR if i == selected_idx else UNSELECTED_COLOR
+        panel.blit(font.render(line, True, color), (16, 16 + i*34))
+        row_y += 34
+
+    surface.blit(panel, (surface.get_width()//2 - panel.get_width()//2, 230))
+
+    # Back button
+    rect = pygame.Rect(surface.get_width()//2 - 140, surface.get_height() - 100, 280, 52)
     mx,my = pygame.mouse.get_pos()
     draw_button(surface, rect, "Back", rect.collidepoint(mx,my))
     return rect
@@ -1166,15 +1147,27 @@ def draw_help(surface):
 # Game loop
 # ----------------------------
 def main():
+    global WIDTH, HEIGHT, GRID_W, GRID_H
+
+    load_settings()
+
+    # Size and flags from settings
+    WIDTH, HEIGHT = SETTINGS.get("window_size", [1024, 640])
+    flags = pygame.FULLSCREEN if SETTINGS.get("fullscreen", False) else 0
+
     pygame.init()
     fps_font = pygame.font.SysFont("consolas", 16)
-    screen=pygame.display.set_mode((WIDTH,HEIGHT))
+    screen=pygame.display.set_mode((WIDTH,HEIGHT), flags)
     pygame.display.set_caption("Monsters of the Deep — roguelite prototype")
     clock=pygame.time.Clock()
 
-    game_state = "menu"  # "menu", "help", "playing", "paused"
+    # Grid size (world stays constant regardless of window size)
+    GRID_W, GRID_H = 1024 // TILE, 640 // TILE  # keep original world dimensions
+
+    game_state = "menu"  # "menu", "help", "options", "playing", "paused"
     selected_index = 0
-    menu_items = ["Start Game", "How to Play", "Quit"]
+    menu_items = ["Start Game", "How to Play", "Options", "Quit"]
+    options_index = 0
     world=None
     paused=False
 
@@ -1196,6 +1189,11 @@ def main():
     while running:
         dt = clock.tick(FPS) / 1000.0
 
+        # Draw FPS (only if enabled)
+        if SETTINGS.get("show_fps", True):
+            fps_text = fps_font.render(f"{int(clock.get_fps())} FPS", True, (255, 255, 255))
+            screen.blit(fps_text, (WIDTH - fps_text.get_width() - 10, 10))
+
         for ev in pygame.event.get():
             if ev.type == pygame.QUIT:
                 running = False
@@ -1215,6 +1213,8 @@ def main():
                             help_timer = 5.0
                         elif choice == "How to Play":
                             game_state = "help"
+                        elif choice == "Options":
+                            game_state = "options"; options_index = 0
                         elif choice == "Quit":
                             running = False
                     elif ev.key in (pygame.K_ESCAPE,):
@@ -1223,6 +1223,47 @@ def main():
                 elif game_state == "help":
                     if ev.key in (pygame.K_ESCAPE, pygame.K_RETURN, pygame.K_SPACE):
                         game_state = "menu"
+
+                elif game_state == "options":
+                    total_opts = 6  # FPS, trails, dmg nums, darkness, fullscreen, size
+                    if ev.key in (pygame.K_ESCAPE, pygame.K_RETURN, pygame.K_SPACE):
+                        # Save whenever you leave options
+                        save_settings()
+                        game_state = "menu"
+                    elif ev.key in (pygame.K_UP, pygame.K_w):
+                        options_index = (options_index - 1) % (total_opts + 1)  # +1 for spacer
+                        if options_index == total_opts:  # skip spacer
+                            options_index = total_opts - 1
+                    elif ev.key in (pygame.K_DOWN, pygame.K_s):
+                        options_index = (options_index + 1) % (total_opts + 1)
+                        if options_index == total_opts:  # skip spacer
+                            options_index = 0
+                    elif ev.key in (pygame.K_LEFT, pygame.K_a, pygame.K_RIGHT, pygame.K_d):
+                        left = ev.key in (pygame.K_LEFT, pygame.K_a)
+                        if options_index == 0:
+                            SETTINGS["show_fps"] = not SETTINGS.get("show_fps", True)
+                        elif options_index == 1:
+                            SETTINGS["bullet_trails"] = not SETTINGS.get("bullet_trails", True)
+                        elif options_index == 2:
+                            SETTINGS["damage_numbers"] = not SETTINGS.get("damage_numbers", True)
+                        elif options_index == 3:
+                            step = -0.1 if left else 0.1
+                            SETTINGS["darkness"] = clamp(round(SETTINGS.get("darkness", 1.0) + step, 1), 0.5, 1.5)
+                        elif options_index == 4:
+                            SETTINGS["fullscreen"] = not SETTINGS.get("fullscreen", False)
+                            flags = pygame.FULLSCREEN if SETTINGS["fullscreen"] else 0
+                            screen = pygame.display.set_mode((WIDTH, HEIGHT), flags)
+                        #elif options_index == 5:
+                        #    sizes = [(1024, 640), (1280, 720), (1600, 900), (1920, 1080)]
+                        #    cur_tuple = tuple(SETTINGS.get("window_size", [1024, 640]))
+                        #    cur = sizes.index(cur_tuple) if cur_tuple in sizes else 0
+                        #    cur = (cur - 1) % len(sizes) if left else (cur + 1) % len(sizes)
+                        #    SETTINGS["window_size"] = list(sizes[cur])
+                        #    WIDTH, HEIGHT = SETTINGS["window_size"]
+                        #    if not SETTINGS.get("fullscreen", False):
+                        #        screen = pygame.display.set_mode((WIDTH, HEIGHT))
+                        # persist after each change
+                        save_settings()
 
                 elif game_state == "playing":
                     # Esc / P: close shop or upgrade, or cancel placement, or pause
@@ -1298,13 +1339,11 @@ def main():
 
                         # Shop buying (when shop open)
                         elif world.player.in_shop and ev.key in (
-                            pygame.K_0,
                             pygame.K_1, pygame.K_2, pygame.K_3, pygame.K_4,
                             pygame.K_5, pygame.K_6, pygame.K_7, pygame.K_8, 
                             pygame.K_9
                         ):
                             idx = {
-                                pygame.K_0:"critical_chance",
                                 pygame.K_1:"speed", pygame.K_2:"damage", pygame.K_3:"hp",
                                 pygame.K_4:"capacity", pygame.K_5:"turret_basic", pygame.K_6:"basehp",
                                 pygame.K_7:"turret_flame", pygame.K_8:"turret_ice", pygame.K_9:"shotspeed"
@@ -1342,6 +1381,8 @@ def main():
                                 help_timer = 5.0
                             elif choice == "How to Play":
                                 game_state = "help"
+                            elif choice == "Options":
+                                game_state = "options"; options_index = 0
                             elif choice == "Quit":
                                 running = False
                             break
@@ -1349,12 +1390,19 @@ def main():
                     back_rect = draw_help(screen)
                     if back_rect.collidepoint(mx,my):
                         game_state = "menu"
+                elif game_state == "options" and ev.button==1:
+                    back_rect = draw_options(screen, options_index)
+                    if back_rect.collidepoint(mx,my):
+                        save_settings()
+                        game_state = "menu"
                 elif game_state == "paused" and world and ev.button==1:
                     buttons = world.draw_pause_menu(screen)
                     for label, rect in buttons:
                         if rect.collidepoint(mx,my):
                             if label == "Resume":
                                 paused = False; game_state = "playing"
+                            elif label == "Options":
+                                game_state = "options"; options_index = 0
                             elif label == "Restart":
                                 world = World(); paused = False; game_state = "playing"
                             elif label == "Main Menu":
@@ -1404,13 +1452,15 @@ def main():
             world.update(dt)
 
         # Draw
-        if game_state in ("menu", "help"):
+        if game_state in ("menu", "help", "options"):
             if game_state == "menu":
                 rects = draw_main_menu(screen, menu_items, -1)
                 if 0 <= selected_index < len(rects):
                     pygame.draw.rect(screen, (240,210,90), rects[selected_index], 3)
-            else:
+            elif game_state == "help":
                 draw_help(screen)
+            elif game_state == "options":
+                draw_options(screen, options_index)
         else:
             if world:
                 world.draw(screen)
@@ -1420,12 +1470,9 @@ def main():
                 help_timer -= dt
                 screen.blit(helpsurf, (10, HEIGHT - helpsurf.get_height() - 10))
 
-        # draw FPS last so it stays visible
-        fps_text = fps_font.render(f"{int(clock.get_fps())} FPS", True, (255, 255, 255))
-        screen.blit(fps_text, (WIDTH - fps_text.get_width() - 10, 10))
-
         pygame.display.flip()
 
+    save_settings()
     pygame.quit()
 
 if __name__=="__main__":
