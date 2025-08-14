@@ -21,9 +21,9 @@ FPS = 60
 SETTINGS_FILE = "settings.json"
 SETTINGS = {
     "show_fps": True,
-    "bullet_trails": True,         # placeholder toggle (non-invasive)
-    "damage_numbers": True,        # placeholder toggle (non-invasive)
-    "darkness": 1.0,               # 0.5 – 1.5
+    "bullet_trails": True,
+    "damage_numbers": True,
+    "darkness": 1.0,   # 0.5 – 1.5
 }
 
 def load_settings():
@@ -79,10 +79,9 @@ def generate_maze(w, h):
     return grid
 
 # ----------------------------
-# Connectivity fixes (guarantee all open tiles reachable from base)
+# Connectivity fixes
 # ----------------------------
 def flood_reachable(grid, start):
-    """Return a set of open (0) cells reachable from start via 4-neighbors."""
     w, h = len(grid), len(grid[0])
     q = deque([start])
     seen = set([start])
@@ -95,7 +94,6 @@ def flood_reachable(grid, start):
     return seen
 
 def component_from(grid, seed, banned):
-    """Return one open component (set) grown from seed, avoiding 'banned' cells."""
     w, h = len(grid), len(grid[0])
     q = deque([seed])
     comp = set([seed])
@@ -108,10 +106,6 @@ def component_from(grid, seed, banned):
     return comp
 
 def connect_component_with_wall_knock(grid, comp, main):
-    """
-    Try to connect 'comp' to 'main' by converting a single separating wall to floor.
-    Returns True if successful.
-    """
     w, h = len(grid), len(grid[0])
     for (x, y) in comp:
         for dx, dy in ((1,0),(-1,0),(0,1),(0,-1)):
@@ -124,7 +118,6 @@ def connect_component_with_wall_knock(grid, comp, main):
     return False
 
 def carve_corridor(grid, a, b):
-    """Carve a thin Manhattan corridor from a to b (inclusive)."""
     ax, ay = a; bx, by = b
     x, y = ax, ay
     while x != bx:
@@ -135,10 +128,6 @@ def carve_corridor(grid, a, b):
         grid[x][y] = 0
 
 def ensure_full_connectivity(grid, start):
-    """
-    Ensure all open cells (0) are reachable from 'start'.
-    Mutates 'grid' to connect stray open components back to the main region.
-    """
     w, h = len(grid), len(grid[0])
     main = flood_reachable(grid, start)
     all_open = {(x,y) for x in range(w) for y in range(h) if grid[x][y] == 0}
@@ -149,7 +138,6 @@ def ensure_full_connectivity(grid, start):
         if connect_component_with_wall_knock(grid, comp, main):
             main = flood_reachable(grid, start)
         else:
-            # carve corridor to nearest main tile
             best_pair = None
             best_d = 10**9
             for cx, cy in comp:
@@ -210,7 +198,7 @@ class Bullet:
         self.is_crit = is_crit
         self.radius = 3
 
-        # --- simple trail state
+        # trail state
         self.trail = []                 # list of (x, y, time_left)
         self.trail_maxlife = 0.25       # seconds a trail puff lives
         self.trail_interval = 0.02      # how often we drop a puff
@@ -252,7 +240,7 @@ class Bullet:
         if not self.alive: return
         px = int(self.x - cam[0]); py = int(self.y - cam[1])
 
-        # trail (alpha circles)
+        # trail
         if SETTINGS.get("bullet_trails", True):
             trail_col = (255, 90, 220) if self.is_crit else self.color
             for (tx, ty, tlife) in self.trail:
@@ -269,43 +257,35 @@ class Bullet:
         if self.is_crit:
             pygame.draw.circle(surf, (255, 90, 220), (px, py), self.radius+2, 1)
 
-# ----------------------------
-# Damage Numbers
-# ----------------------------
-class DamageText:
-    def __init__(self, pos, amount, crit=False):
-        self.x, self.y = pos
-        self.text = str(int(round(amount)))
-        self.life = 0.75
-        self.max_life = 0.75
-        self.vy = -28.0
-        self.vx = random.uniform(-10, 10)
+# --- NEW: floating damage numbers ---
+class DamageNumber:
+    def __init__(self, x, y, amount, crit=False, color=YELLOW):
+        self.x, self.y = x, y
+        # readable formatting
+        self.text = f"{amount:.1f}" if amount < 10 else str(int(round(amount)))
+        self.life = 0.7 if not crit else 0.9
+        self.vy = -40.0  # pixels/sec upward drift
         self.crit = crit
-        self.alive = True
-        self.scale = 1.2 if crit else 1.0
+        self.color = (255, 90, 220) if crit else color
+        # pre-render once (perf)
+        size = 18 if not crit else 22
+        font = pygame.font.SysFont("consolas", size, bold=True)
+        self.base_img = font.render(self.text, True, self.color)
 
     def update(self, dt):
-        if not self.alive:
-            return
-        self.life -= dt
-        if self.life <= 0:
-            self.alive = False
-            return
         self.y += self.vy * dt
-        self.x += self.vx * dt
-        self.vx *= (1.0 - 2.5 * dt)
+        self.life -= dt
 
     def draw(self, surf, cam):
-        if not self.alive:
-            return
-        a = max(0.0, min(1.0, self.life / self.max_life))
-        alpha = int(255 * a)
-        color = (255, 90, 220) if self.crit else (240, 210, 90)
-        font = pygame.font.SysFont("consolas", int(18 * self.scale), bold=self.crit)
-        txt = font.render(self.text, True, color)
-        txt.set_alpha(alpha)
-        px = int(self.x - cam[0]); py = int(self.y - cam[1])
-        surf.blit(txt, (px - txt.get_width() // 2, py - txt.get_height() // 2))
+        if self.life <= 0: return
+        # simple fade
+        max_life = 0.9 if self.crit else 0.7
+        alpha = max(0, min(255, int(255 * (self.life / max_life))))
+        img = self.base_img
+        if alpha < 255:
+            img = self.base_img.copy()
+            img.fill((255,255,255,alpha), special_flags=pygame.BLEND_RGBA_MULT)
+        surf.blit(img, (int(self.x - cam[0]), int(self.y - cam[1])))
 
 class Enemy:
     def __init__(self,grid_pos, tier=1):
@@ -313,14 +293,13 @@ class Enemy:
         self.x,self.y = self.gx*TILE+TILE/2, self.gy*TILE+TILE/2
         self.base_speed = 1.2 + 0.2*tier
         self.hp = 2 + tier
-        self.max_hp = self.hp  # track max HP for HP bar
+        self.max_hp = self.hp
         self.damage = 4 + 2*tier
         self.tier=tier
         self.path_timer=0
         self.next_cell=(self.gx,self.gy)
         self.alive=True
         self.hit_timer=0
-        # Status effects
         self.dots=[]   # list of dicts: {"dps":.., "t":..}
         self.slows=[]  # list of dicts: {"factor":.., "t":..}
     def grid_cell(self): return int(self.x//TILE), int(self.y//TILE)
@@ -381,15 +360,13 @@ class Enemy:
         if self.slows:
             pygame.draw.circle(surf, CYAN, (px, py), 12+self.tier,1)
 
-        # --- HP bar (show when damaged or recently hit) ---
+        # HP bar
         if self.hp < self.max_hp or self.hit_timer > 0:
-            w = 26 + self.tier*3   # slight size bump with tier
+            w = 26 + self.tier*3
             h = 4
             ratio = max(0.0, min(1.0, self.hp / self.max_hp))
             x = px - w//2
             y = py - (14 + self.tier*2)
-
-            # border/background
             pygame.draw.rect(surf, (30,30,30), pygame.Rect(x-1, y-1, w+2, h+2))
             pygame.draw.rect(surf, (90,20,20),  pygame.Rect(x, y, w, h))
             if ratio > 0:
@@ -497,9 +474,8 @@ class Turret:
         self.x,self.y=cell[0]*TILE+TILE/2, cell[1]*TILE+TILE/2
         self.type = turret_type if turret_type in TURRET_KINDS else "basic"
         self.cooldown=0
-        self.upgrades = {"dmg":0, "rng":0, "rate":0}  # per-turret levels
+        self.upgrades = {"dmg":0, "rng":0, "rate":0}
 
-    # ----- Upgrade economics -----
     def upgrade_level(self, key): return self.upgrades.get(key,0)
     def can_upgrade(self, key): return self.upgrade_level(key) < MAX_UPGRADE
     def upgrade_cost(self, key):
@@ -512,7 +488,6 @@ class Turret:
         if self.can_upgrade(key):
             self.upgrades[key] += 1
 
-    # ----- Stats w/ upgrade scaling -----
     def base_cfg(self):
         return TURRET_KINDS[self.type]
 
@@ -530,8 +505,7 @@ class Turret:
 
         rng = int(cfg["range"] * (1 + 0.15*lr))
         proj_speed = cfg["proj_speed"] * (1 + 0.05*lr)
-
-        rate = cfg["rate"] * (0.88 ** lf)  # lower cooldown per level
+        rate = cfg["rate"] * (0.88 ** lf)
 
         return {
             "damage": damage, "dot_dps": dot_dps, "dot_dur": dot_dur,
@@ -566,7 +540,6 @@ class Turret:
         px, py = int(self.x - cam[0]), int(self.y - cam[1])
         pygame.draw.circle(surf, st["color"],(px,py), 10)
         pygame.draw.circle(surf, WHITE,(px,py), 10,1)
-        # small pips to show upgrade levels (dmg/rng/rate)
         for i,key in enumerate(("dmg","rng","rate")):
             lvl = self.upgrade_level(key)
             if lvl>0:
@@ -585,7 +558,6 @@ class World:
             for y in range(self.base_cell[1]-2, self.base_cell[1]+3):
                 if 0<=x<GRID_W and 0<=y<GRID_H: self.grid[x][y]=0
 
-        # Ensure everything is reachable from the base
         ensure_full_connectivity(self.grid, self.base_cell)
 
         self.player = Player(self, (self.base_cell[0]*TILE+TILE/2, self.base_cell[1]*TILE+TILE/2))
@@ -593,7 +565,7 @@ class World:
         self.pickups=[]
         self.bullets=[]
         self.turrets=[]
-        self.floaters=[]   # damage numbers
+        self.floaties=[]   # --- NEW: damage numbers ---
         self.active_wave = False
         self.waiting_next_wave = True
         self.say("Press [N] to start Wave 1", 3.0)
@@ -603,7 +575,6 @@ class World:
         self.deposit_radius=48
         self.message=""
         self.message_timer=0
-        # Upgrade UI state
         self.upgrade_target = None
 
     def say(self,txt,dur=2.0):
@@ -624,7 +595,6 @@ class World:
         gx,gy = cell
         if not (0<=gx<GRID_W and 0<=gy<GRID_H):
             return False
-        # Place on WALLS (must be solid)
         if self.grid[gx][gy] == 0:
             return False
         for t in self.turrets:
@@ -632,7 +602,6 @@ class World:
                 return False
         return True
 
-    # ---- Upgrades helpers ----
     def nearest_turret_to_world(self, wx, wy, radius=28):
         if not self.turrets: return None
         best=None; bestd=1e9
@@ -674,10 +643,10 @@ class World:
                 for e in self.enemies:
                     if dist((b.x,b.y),(e.x,e.y))<12+e.tier and e.alive:
                         e.hp -= b.damage
-                        # spawn damage text
+                        # --- NEW: spawn damage number on hit
                         if SETTINGS.get("damage_numbers", True):
-                            self.floaters.append(
-                                DamageText((e.x, e.y - 8), b.damage, crit=getattr(b, "is_crit", False))
+                            self.floaties.append(
+                                DamageNumber(e.x, e.y-14, b.damage, crit=getattr(b, "is_crit", False))
                             )
                         if b.dot_dps>0: e.apply_dot(b.dot_dps, b.dot_dur)
                         if b.slow_factor<1.0: e.apply_slow(b.slow_factor, b.slow_dur)
@@ -686,18 +655,20 @@ class World:
                         break
             if not b.alive:
                 self.bullets.remove(b)
+
         for p in list(self.pickups):
             p.update(dt,self)
             if dist((self.player.x,self.player.y),(p.x,p.y))<14 and self.player.backpack_space():
                 self.player.backpack.append(p)
                 self.pickups.remove(p)
+
         for t in self.turrets: t.update(dt,self)
 
-        # update damage texts
-        for f in list(self.floaters):
-            f.update(dt)
-            if not f.alive:
-                self.floaters.remove(f)
+        # --- NEW: update/cull damage numbers
+        for dn in list(self.floaties):
+            dn.update(dt)
+            if dn.life <= 0:
+                self.floaties.remove(dn)
 
         if self.active_wave and not self.enemies:
             self.active_wave = False
@@ -712,7 +683,6 @@ class World:
             self.spawn_wave()
 
     def spawn_wave(self):
-        # boss every 10th wave
         if self.wave % 10 == 0:
             for _tries in range(400):
                 x = random.choice([1, GRID_W - 2])
@@ -740,7 +710,6 @@ class World:
             self.wave += 1
             return
 
-        # regular wave
         count = min(3 + self.wave, 18)
         for _ in range(count):
             for _tries in range(100):
@@ -797,7 +766,7 @@ class World:
             p.cores-=2; self.base_hp=min(200, self.base_hp+30); self.say("Base repaired +30")
         elif item=="shotspeed" and p.scrap>=4:
             p.scrap -= 4
-            p.fire_delay = max(0.06, p.fire_delay * 0.88)  # 12% faster (multiplicative)
+            p.fire_delay = max(0.06, p.fire_delay * 0.88)
             self.say("Shot speed (fire rate) +12%")
         else:
             self.say("Not enough currency")
@@ -824,12 +793,12 @@ class World:
                 pygame.draw.circle(screen, (220,220,240), (int(t.x- self.camera[0]), int(t.y- self.camera[1])), rng, 1)
         for e in self.enemies: e.draw(screen, self.camera)
         for b in self.bullets: b.draw(screen, self.camera)
-
-        # draw damage numbers
-        for f in self.floaters:
-            f.draw(screen, self.camera)
-
         self.player.draw(screen)
+
+        # --- draw damage numbers on top of entities ---
+        if SETTINGS.get("damage_numbers", True):
+            for dn in self.floaties:
+                dn.draw(screen, self.camera)
 
         if self.upgrade_target:
             overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
@@ -861,11 +830,9 @@ class World:
         dark = pygame.Surface((WIDTH,HEIGHT), pygame.SRCALPHA)
         px,py = int(self.player.x-self.camera[0]), int(self.player.y-self.camera[1])
         radius = 130 + int(20*self.player.flashlight_level)
-
         scale = clamp(SETTINGS.get("darkness", 1.0), 0.5, 1.5)
         a_outer = int(180 * scale)
         a_inner = int(90 * scale)
-
         for r,alpha in [(radius, a_outer),(radius//2, a_inner)]:
             pygame.draw.circle(dark,(0,0,0,alpha),(px,py),r)
         pygame.draw.circle(dark,(0,0,0,0),(px,py), int(radius*0.6))
@@ -946,7 +913,6 @@ class World:
         pygame.draw.rect(panel,(140,180,240),panel.get_rect(),2)
         title = f"UPGRADE TURRET [{t.type.upper()}] — scrap:{self.player.scrap}"
         panel.blit(font.render(title, True, WHITE),(12,10))
-
         def line(lbl, key, y):
             lvl = t.upgrade_level(key)
             cost = t.upgrade_cost(key)
@@ -956,7 +922,6 @@ class World:
             panel.blit(font.render(text, True, col),(24,y))
             if maxed:
                 panel.blit(small.render("MAXED", True, (240,210,90)), (panel.get_width()-90, y))
-
         line("1) +Damage (boosts DoT/slow duration on special)", "dmg", 52)
         line("2) +Range", "rng", 84)
         line("3) +Fire Rate (lower cooldown)", "rate", 116)
@@ -1188,7 +1153,7 @@ def main():
 
     GRID_W, GRID_H = 1024 // TILE, 640 // TILE  # keep original world dimensions
 
-    game_state = "menu"  # "menu", "help", "options", "playing", "paused"
+    game_state = "menu"
     selected_index = 0
     menu_items = ["Start Game", "How to Play", "Options", "Quit"]
     options_index = 0
@@ -1469,7 +1434,7 @@ def main():
                 help_timer -= dt
                 screen.blit(helpsurf, (10, HEIGHT - helpsurf.get_height() - 10))
 
-        # Draw FPS last so it remains visible
+        # --- draw overlays LAST so they’re visible ---
         if SETTINGS.get("show_fps", True):
             fps_text = fps_font.render(f"{int(clock.get_fps())} FPS", True, (255, 255, 255))
             screen.blit(fps_text, (WIDTH - fps_text.get_width() - 10, 10))
