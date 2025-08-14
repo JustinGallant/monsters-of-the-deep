@@ -257,17 +257,15 @@ class Bullet:
         if self.is_crit:
             pygame.draw.circle(surf, (255, 90, 220), (px, py), self.radius+2, 1)
 
-# --- NEW: floating damage numbers ---
+# --- Floating damage numbers ---
 class DamageNumber:
     def __init__(self, x, y, amount, crit=False, color=YELLOW):
         self.x, self.y = x, y
-        # readable formatting
         self.text = f"{amount:.1f}" if amount < 10 else str(int(round(amount)))
         self.life = 0.7 if not crit else 0.9
-        self.vy = -40.0  # pixels/sec upward drift
+        self.vy = -40.0
         self.crit = crit
         self.color = (255, 90, 220) if crit else color
-        # pre-render once (perf)
         size = 18 if not crit else 22
         font = pygame.font.SysFont("consolas", size, bold=True)
         self.base_img = font.render(self.text, True, self.color)
@@ -278,7 +276,6 @@ class DamageNumber:
 
     def draw(self, surf, cam):
         if self.life <= 0: return
-        # simple fade
         max_life = 0.9 if self.crit else 0.7
         alpha = max(0, min(255, int(255 * (self.life / max_life))))
         img = self.base_img
@@ -288,7 +285,7 @@ class DamageNumber:
         surf.blit(img, (int(self.x - cam[0]), int(self.y - cam[1])))
 
 class Enemy:
-    def __init__(self,grid_pos, tier=1):
+    def __init__(self, grid_pos, tier=1, immune_slow=False, immune_dot=False):
         self.gx,self.gy = grid_pos
         self.x,self.y = self.gx*TILE+TILE/2, self.gy*TILE+TILE/2
         self.base_speed = 1.2 + 0.2*tier
@@ -300,15 +297,24 @@ class Enemy:
         self.next_cell=(self.gx,self.gy)
         self.alive=True
         self.hit_timer=0
+        # Status effects
         self.dots=[]   # list of dicts: {"dps":.., "t":..}
         self.slows=[]  # list of dicts: {"factor":.., "t":..}
+        # --- NEW: immunity flags ---
+        self.immune_slow = immune_slow
+        self.immune_dot = immune_dot
+
     def grid_cell(self): return int(self.x//TILE), int(self.y//TILE)
 
     def apply_dot(self, dps, duration):
+        if self.immune_dot: 
+            return
         if dps<=0 or duration<=0: return
         self.dots.append({"dps":dps, "t":duration})
 
     def apply_slow(self, factor, duration):
+        if self.immune_slow:
+            return
         if duration<=0 or factor>=1.0: return
         self.slows.append({"factor":max(0.1, factor), "t":duration})
 
@@ -353,6 +359,7 @@ class Enemy:
             self.gx,self.gy=int(self.x//TILE), int(self.y//TILE)
         if (self.gx,self.gy)==world.base_cell:
             world.base_hp = max(0, world.base_hp - self.damage*dt)
+
     def draw(self,surf,cam):
         px, py = int(self.x - cam[0]), int(self.y - cam[1])
         c = (200,60,60) if self.hit_timer<=0 else (255,200,200)
@@ -372,9 +379,24 @@ class Enemy:
             if ratio > 0:
                 pygame.draw.rect(surf, (80,210,120), pygame.Rect(x, y, int(w*ratio), h))
 
+            # --- NEW: immunity badges above the HP bar ---
+            badge_y = y - 10
+            if self.immune_slow:
+                # cyan shield
+                pygame.draw.polygon(
+                    surf, CYAN,
+                    [(x, badge_y), (x+8, badge_y), (x+10, badge_y+5), (x+4, badge_y+10), (x-2, badge_y+5)]
+                )
+                x += 14
+            if self.immune_dot:
+                # orange flame
+                flame_pts = [(x, badge_y+10),(x+6, badge_y+2),(x+3, badge_y+6),(x+9, badge_y)]
+                pygame.draw.lines(surf, ORANGE, False, flame_pts, 2)
+
 class Boss(Enemy):
     def __init__(self, grid_pos, wave_index):
-        super().__init__(grid_pos, tier=6 + wave_index // 10)
+        # Boss is slow-immune by default
+        super().__init__(grid_pos, tier=6 + wave_index // 10, immune_slow=True, immune_dot=False)
         self.is_boss = True
         self.base_speed = 1.3
         self.max_hp = self.hp = 240 + 40 * (wave_index // 10)
@@ -413,6 +435,7 @@ class Boss(Enemy):
             if not options:
                 break
             x, y = options.pop()
+            # minions inherit no immunities (feel free to change)
             world.enemies.append(Enemy((x, y), tier=max(2, 1 + world.wave // 4)))
 
     def draw(self, surf, cam):
@@ -431,6 +454,13 @@ class Boss(Enemy):
         pygame.draw.rect(surf, (110, 30, 110), pygame.Rect(x, y, w, h))
         if ratio > 0:
             pygame.draw.rect(surf, (210, 110, 240), pygame.Rect(x, y, int(w * ratio), h))
+        # badge row
+        if self.immune_slow:
+            badge_y = y - 10
+            pygame.draw.polygon(
+                surf, CYAN,
+                [(x, badge_y), (x+8, badge_y), (x+10, badge_y+5), (x+4, badge_y+10), (x-2, badge_y+5)]
+            )
 
 class Pickup:
     def __init__(self,pos,type="scrap",amount=1):
@@ -565,7 +595,7 @@ class World:
         self.pickups=[]
         self.bullets=[]
         self.turrets=[]
-        self.floaties=[]   # --- NEW: damage numbers ---
+        self.floaties=[]
         self.active_wave = False
         self.waiting_next_wave = True
         self.say("Press [N] to start Wave 1", 3.0)
@@ -643,11 +673,11 @@ class World:
                 for e in self.enemies:
                     if dist((b.x,b.y),(e.x,e.y))<12+e.tier and e.alive:
                         e.hp -= b.damage
-                        # --- NEW: spawn damage number on hit
                         if SETTINGS.get("damage_numbers", True):
                             self.floaties.append(
                                 DamageNumber(e.x, e.y-14, b.damage, crit=getattr(b, "is_crit", False))
                             )
+                        # respect immunities inside e.apply_*()
                         if b.dot_dps>0: e.apply_dot(b.dot_dps, b.dot_dur)
                         if b.slow_factor<1.0: e.apply_slow(b.slow_factor, b.slow_dur)
                         e.hit_timer=0.1
@@ -664,7 +694,6 @@ class World:
 
         for t in self.turrets: t.update(dt,self)
 
-        # --- NEW: update/cull damage numbers
         for dn in list(self.floaties):
             dn.update(dt)
             if dn.life <= 0:
@@ -683,6 +712,11 @@ class World:
             self.spawn_wave()
 
     def spawn_wave(self):
+        # --- immunity spawn chances scale with waves ---
+        slow_immune_chance = min(0.10 + 0.01 * self.wave, 0.40)  # up to 40%
+        dot_immune_chance  = min(0.06 + 0.008 * self.wave, 0.30) # up to 30%
+
+        # boss every 10th wave
         if self.wave % 10 == 0:
             for _tries in range(400):
                 x = random.choice([1, GRID_W - 2])
@@ -702,7 +736,10 @@ class World:
                         x = random.randrange(1, GRID_W-1)
                         y = random.choice([1, GRID_H-2])
                     if self.grid[x][y] == 0:
-                        self.enemies.append(Enemy((x, y), tier=1 + self.wave // 4))
+                        # sprinkle immune variants among regulars
+                        im_slow = random.random() < slow_immune_chance
+                        im_dot  = random.random() < dot_immune_chance
+                        self.enemies.append(Enemy((x, y), tier=1 + self.wave // 4, immune_slow=im_slow, immune_dot=im_dot))
                         break
             self.active_wave = True
             self.waiting_next_wave = False
@@ -710,6 +747,7 @@ class World:
             self.wave += 1
             return
 
+        # regular wave
         count = min(3 + self.wave, 18)
         for _ in range(count):
             for _tries in range(100):
@@ -719,7 +757,9 @@ class World:
                     x = random.randrange(1, GRID_W-1)
                     y = random.choice([1, GRID_H-2])
                 if self.grid[x][y] == 0:
-                    self.enemies.append(Enemy((x, y), tier=1 + self.wave // 4))
+                    im_slow = random.random() < slow_immune_chance
+                    im_dot  = random.random() < dot_immune_chance
+                    self.enemies.append(Enemy((x, y), tier=1 + self.wave // 4, immune_slow=im_slow, immune_dot=im_dot))
                     break
         self.active_wave = True
         self.waiting_next_wave = False
@@ -795,7 +835,6 @@ class World:
         for b in self.bullets: b.draw(screen, self.camera)
         self.player.draw(screen)
 
-        # --- draw damage numbers on top of entities ---
         if SETTINGS.get("damage_numbers", True):
             for dn in self.floaties:
                 dn.draw(screen, self.camera)
@@ -1434,7 +1473,7 @@ def main():
                 help_timer -= dt
                 screen.blit(helpsurf, (10, HEIGHT - helpsurf.get_height() - 10))
 
-        # --- draw overlays LAST so they’re visible ---
+        # overlays last
         if SETTINGS.get("show_fps", True):
             fps_text = fps_font.render(f"{int(clock.get_fps())} FPS", True, (255, 255, 255))
             screen.blit(fps_text, (WIDTH - fps_text.get_width() - 10, 10))
