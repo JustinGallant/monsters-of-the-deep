@@ -24,6 +24,8 @@ SETTINGS = {
     "bullet_trails": True,
     "damage_numbers": True,
     "darkness": 1.0,   # 0.5 – 1.5
+    "fullscreen": False,
+    "window_size": [1024, 640],
 }
 
 def load_settings():
@@ -79,7 +81,7 @@ def generate_maze(w, h):
     return grid
 
 # ----------------------------
-# Connectivity fixes
+# Connectivity fixes (guarantee all open tiles reachable from base)
 # ----------------------------
 def flood_reachable(grid, start):
     w, h = len(grid), len(grid[0])
@@ -132,7 +134,6 @@ def ensure_full_connectivity(grid, start):
     main = flood_reachable(grid, start)
     all_open = {(x,y) for x in range(w) for y in range(h) if grid[x][y] == 0}
     remaining = list(all_open - main)
-
     while remaining:
         comp = component_from(grid, remaining[0], banned=main)
         if connect_component_with_wall_knock(grid, comp, main):
@@ -149,7 +150,6 @@ def ensure_full_connectivity(grid, start):
             if best_pair:
                 carve_corridor(grid, best_pair[0], best_pair[1])
                 main = flood_reachable(grid, start)
-
         all_open = {(x,y) for x in range(w) for y in range(h) if grid[x][y] == 0}
         remaining = list(all_open - main)
 
@@ -197,21 +197,18 @@ class Bullet:
         self.playerBullet=playerBullet
         self.is_crit = is_crit
         self.radius = 3
-
-        # trail state
+        # trail cosmetics
         self.trail = []                 # list of (x, y, time_left)
-        self.trail_maxlife = 0.25       # seconds a trail puff lives
-        self.trail_interval = 0.02      # how often we drop a puff
-        self.trail_acc = 0.0            # accumulator for interval timing
+        self.trail_maxlife = 0.25
+        self.trail_interval = 0.02
+        self.trail_acc = 0.0
 
     def update(self, dt, world):
         if not self.alive: return
+        self.x += self.vx*dt
+        self.y += self.vy*dt
 
-        # movement
-        dx = self.vx*dt; dy = self.vy*dt
-        self.x += dx; self.y += dy
-
-        # spawn/fade trail puffs
+        # trail puffs (option)
         self.trail_acc += dt
         if SETTINGS.get("bullet_trails", True):
             while self.trail_acc >= self.trail_interval:
@@ -225,12 +222,10 @@ class Bullet:
                 self.trail.clear()
             self.trail_acc = 0.0
 
-        # lifetime
         self.life -= dt
         if self.life <= 0:
             self.alive = False
 
-        # collide with walls if it's a player bullet
         if self.alive and self.playerBullet:
             gx,gy=int(self.x//TILE), int(self.y//TILE)
             if world.is_solid(gx,gy):
@@ -240,7 +235,6 @@ class Bullet:
         if not self.alive: return
         px = int(self.x - cam[0]); py = int(self.y - cam[1])
 
-        # trail
         if SETTINGS.get("bullet_trails", True):
             trail_col = (255, 90, 220) if self.is_crit else self.color
             for (tx, ty, tlife) in self.trail:
@@ -251,41 +245,13 @@ class Bullet:
                 pygame.draw.circle(s, (*trail_col, alpha), (ts//2, ts//2), r)
                 surf.blit(s, (int(tx - cam[0]) - r, int(ty - cam[1]) - r))
 
-        # core bullet
         core_col = (255, 255, 255) if self.is_crit else self.color
         pygame.draw.circle(surf, core_col, (px, py), self.radius)
         if self.is_crit:
             pygame.draw.circle(surf, (255, 90, 220), (px, py), self.radius+2, 1)
 
-# --- Floating damage numbers ---
-class DamageNumber:
-    def __init__(self, x, y, amount, crit=False, color=YELLOW):
-        self.x, self.y = x, y
-        self.text = f"{amount:.1f}" if amount < 10 else str(int(round(amount)))
-        self.life = 0.7 if not crit else 0.9
-        self.vy = -40.0
-        self.crit = crit
-        self.color = (255, 90, 220) if crit else color
-        size = 18 if not crit else 22
-        font = pygame.font.SysFont("consolas", size, bold=True)
-        self.base_img = font.render(self.text, True, self.color)
-
-    def update(self, dt):
-        self.y += self.vy * dt
-        self.life -= dt
-
-    def draw(self, surf, cam):
-        if self.life <= 0: return
-        max_life = 0.9 if self.crit else 0.7
-        alpha = max(0, min(255, int(255 * (self.life / max_life))))
-        img = self.base_img
-        if alpha < 255:
-            img = self.base_img.copy()
-            img.fill((255,255,255,alpha), special_flags=pygame.BLEND_RGBA_MULT)
-        surf.blit(img, (int(self.x - cam[0]), int(self.y - cam[1])))
-
 class Enemy:
-    def __init__(self, grid_pos, tier=1, immune_slow=False, immune_dot=False):
+    def __init__(self,grid_pos, tier=1):
         self.gx,self.gy = grid_pos
         self.x,self.y = self.gx*TILE+TILE/2, self.gy*TILE+TILE/2
         self.base_speed = 1.2 + 0.2*tier
@@ -297,29 +263,20 @@ class Enemy:
         self.next_cell=(self.gx,self.gy)
         self.alive=True
         self.hit_timer=0
-        # Status effects
-        self.dots=[]   # list of dicts: {"dps":.., "t":..}
-        self.slows=[]  # list of dicts: {"factor":.., "t":..}
-        # --- NEW: immunity flags ---
-        self.immune_slow = immune_slow
-        self.immune_dot = immune_dot
+        self.dots=[]   # each: {"dps":.., "t":..}
+        self.slows=[]  # each: {"factor":.., "t":..}
 
     def grid_cell(self): return int(self.x//TILE), int(self.y//TILE)
 
     def apply_dot(self, dps, duration):
-        if self.immune_dot: 
-            return
         if dps<=0 or duration<=0: return
         self.dots.append({"dps":dps, "t":duration})
 
     def apply_slow(self, factor, duration):
-        if self.immune_slow:
-            return
         if duration<=0 or factor>=1.0: return
         self.slows.append({"factor":max(0.1, factor), "t":duration})
 
     def _tick_status(self, dt):
-        # DoT
         total_dps=0.0
         for s in self.dots:
             total_dps+=s["dps"]
@@ -328,7 +285,6 @@ class Enemy:
         if total_dps>0:
             self.hp -= total_dps*dt
             self.hit_timer=0.05
-        # Slow
         for s in self.slows:
             s["t"]-=dt
         self.slows=[s for s in self.slows if s["t"]>0]
@@ -357,7 +313,8 @@ class Enemy:
             self.x=self.gx*TILE+TILE/2; self.y=self.gy*TILE+TILE/2
         else:
             self.gx,self.gy=int(self.x//TILE), int(self.y//TILE)
-        if (self.gx,self.gy)==world.base_cell:
+        # base damage disabled while paused
+        if (self.gx,self.gy)==world.base_cell and not world.sim_paused:
             world.base_hp = max(0, world.base_hp - self.damage*dt)
 
     def draw(self,surf,cam):
@@ -379,24 +336,9 @@ class Enemy:
             if ratio > 0:
                 pygame.draw.rect(surf, (80,210,120), pygame.Rect(x, y, int(w*ratio), h))
 
-            # --- NEW: immunity badges above the HP bar ---
-            badge_y = y - 10
-            if self.immune_slow:
-                # cyan shield
-                pygame.draw.polygon(
-                    surf, CYAN,
-                    [(x, badge_y), (x+8, badge_y), (x+10, badge_y+5), (x+4, badge_y+10), (x-2, badge_y+5)]
-                )
-                x += 14
-            if self.immune_dot:
-                # orange flame
-                flame_pts = [(x, badge_y+10),(x+6, badge_y+2),(x+3, badge_y+6),(x+9, badge_y)]
-                pygame.draw.lines(surf, ORANGE, False, flame_pts, 2)
-
 class Boss(Enemy):
     def __init__(self, grid_pos, wave_index):
-        # Boss is slow-immune by default
-        super().__init__(grid_pos, tier=6 + wave_index // 10, immune_slow=True, immune_dot=False)
+        super().__init__(grid_pos, tier=6 + wave_index // 10)
         self.is_boss = True
         self.base_speed = 1.3
         self.max_hp = self.hp = 240 + 40 * (wave_index // 10)
@@ -409,9 +351,9 @@ class Boss(Enemy):
 
     def update(self, dt, world):
         super().update(dt, world)
-        if not self.alive:
-            return
-        if dist((self.x, self.y), (world.player.x, world.player.y)) < self.aura_radius:
+        if not self.alive: return
+        # player aura damage disabled while paused
+        if not world.sim_paused and dist((self.x, self.y), (world.player.x, world.player.y)) < self.aura_radius:
             world.player.hp -= self.aura_dps * dt
             if world.player.hp <= 0:
                 world.player.respawn()
@@ -435,7 +377,6 @@ class Boss(Enemy):
             if not options:
                 break
             x, y = options.pop()
-            # minions inherit no immunities (feel free to change)
             world.enemies.append(Enemy((x, y), tier=max(2, 1 + world.wave // 4)))
 
     def draw(self, surf, cam):
@@ -445,6 +386,7 @@ class Boss(Enemy):
         pygame.draw.circle(surf, (255, 220, 90), (px, py), self.size + self.tier + 2, 2)
         pygame.draw.circle(surf, (180, 80, 80), (px, py), self.aura_radius, 1)
 
+        # Boss HP (always show)
         w = 36 + self.tier * 3
         h = 5
         ratio = max(0.0, min(1.0, self.hp / self.max_hp))
@@ -454,13 +396,6 @@ class Boss(Enemy):
         pygame.draw.rect(surf, (110, 30, 110), pygame.Rect(x, y, w, h))
         if ratio > 0:
             pygame.draw.rect(surf, (210, 110, 240), pygame.Rect(x, y, int(w * ratio), h))
-        # badge row
-        if self.immune_slow:
-            badge_y = y - 10
-            pygame.draw.polygon(
-                surf, CYAN,
-                [(x, badge_y), (x+8, badge_y), (x+10, badge_y+5), (x+4, badge_y+10), (x-2, badge_y+5)]
-            )
 
 class Pickup:
     def __init__(self,pos,type="scrap",amount=1):
@@ -526,17 +461,14 @@ class Turret:
         ld = self.upgrade_level("dmg")
         lr = self.upgrade_level("rng")
         lf = self.upgrade_level("rate")
-
         damage = cfg["damage"] * (1 + 0.25*ld)
         dot_dps = cfg["dot_dps"] * (1 + 0.25*ld)
         dot_dur = cfg["dot_dur"] * (1 + 0.20*ld) if cfg["dot_dur"]>0 else 0.0
         slow_factor = cfg["slow_factor"]
         slow_dur = cfg["slow_dur"] * (1 + 0.20*ld) if cfg["slow_dur"]>0 else 0.0
-
         rng = int(cfg["range"] * (1 + 0.15*lr))
         proj_speed = cfg["proj_speed"] * (1 + 0.05*lr)
         rate = cfg["rate"] * (0.88 ** lf)
-
         return {
             "damage": damage, "dot_dps": dot_dps, "dot_dur": dot_dur,
             "slow_factor": slow_factor, "slow_dur": slow_dur,
@@ -587,7 +519,6 @@ class World:
         for x in range(self.base_cell[0]-2, self.base_cell[0]+3):
             for y in range(self.base_cell[1]-2, self.base_cell[1]+3):
                 if 0<=x<GRID_W and 0<=y<GRID_H: self.grid[x][y]=0
-
         ensure_full_connectivity(self.grid, self.base_cell)
 
         self.player = Player(self, (self.base_cell[0]*TILE+TILE/2, self.base_cell[1]*TILE+TILE/2))
@@ -595,7 +526,6 @@ class World:
         self.pickups=[]
         self.bullets=[]
         self.turrets=[]
-        self.floaties=[]
         self.active_wave = False
         self.waiting_next_wave = True
         self.say("Press [N] to start Wave 1", 3.0)
@@ -606,6 +536,7 @@ class World:
         self.message=""
         self.message_timer=0
         self.upgrade_target = None
+        self.sim_paused = False  # <--- new: simulation paused flag (for damage gating)
 
     def say(self,txt,dur=2.0):
         self.message=txt; self.message_timer=dur
@@ -645,20 +576,25 @@ class World:
         t = self.upgrade_target
         if not t: return
         if not t.can_upgrade(key):
-            self.say("Already at max level")
-            return
+            self.say("Already at max level"); return
         cost = t.upgrade_cost(key)
         if self.player.scrap < cost:
-            self.say(f"Need {cost} scrap")
-            return
+            self.say(f"Need {cost} scrap"); return
         self.player.scrap -= cost
         t.apply_upgrade(key)
         self.say(f"Upgraded {key.upper()} to L{t.upgrade_level(key)}")
 
-    def update(self,dt):
-        self.message_timer=max(0,self.message_timer-dt)
-        self.player.update(dt)
+    def update(self,dt, sim_paused=False):
+        """Advance world. If sim_paused: player is frozen, but world keeps running; player/base are protected."""
+        self.sim_paused = sim_paused
 
+        self.message_timer=max(0,self.message_timer-dt)
+
+        # Player: only update when not sim-paused
+        if not sim_paused:
+            self.player.update(dt)
+
+        # Enemies (pathing, status, etc.)
         for e in list(self.enemies):
             e.update(dt,self)
             if e.hp<=0:
@@ -667,17 +603,14 @@ class World:
                     self.pickups.append(Pickup((e.x,e.y),"scrap", amount=1))
                 if random.random()<0.18:
                     self.pickups.append(Pickup((e.x,e.y),"core", amount=1))
+
+        # Bullets
         for b in list(self.bullets):
             b.update(dt,self)
             if b.alive:
                 for e in self.enemies:
                     if dist((b.x,b.y),(e.x,e.y))<12+e.tier and e.alive:
                         e.hp -= b.damage
-                        if SETTINGS.get("damage_numbers", True):
-                            self.floaties.append(
-                                DamageNumber(e.x, e.y-14, b.damage, crit=getattr(b, "is_crit", False))
-                            )
-                        # respect immunities inside e.apply_*()
                         if b.dot_dps>0: e.apply_dot(b.dot_dps, b.dot_dur)
                         if b.slow_factor<1.0: e.apply_slow(b.slow_factor, b.slow_dur)
                         e.hit_timer=0.1
@@ -686,24 +619,25 @@ class World:
             if not b.alive:
                 self.bullets.remove(b)
 
+        # Pickups
         for p in list(self.pickups):
             p.update(dt,self)
-            if dist((self.player.x,self.player.y),(p.x,p.y))<14 and self.player.backpack_space():
+            # Allow pickup even when paused? No—only when player is active.
+            if (not sim_paused) and dist((self.player.x,self.player.y),(p.x,p.y))<14 and self.player.backpack_space():
                 self.player.backpack.append(p)
                 self.pickups.remove(p)
 
-        for t in self.turrets: t.update(dt,self)
+        # Turrets
+        for t in self.turrets:
+            t.update(dt,self)
 
-        for dn in list(self.floaties):
-            dn.update(dt)
-            if dn.life <= 0:
-                self.floaties.remove(dn)
-
+        # Wave state
         if self.active_wave and not self.enemies:
             self.active_wave = False
             self.waiting_next_wave = True
             self.say(f"Wave {self.wave-1} cleared! Press [N] when ready.", 3.0)
 
+        # Camera still tracks player position (doesn't change while paused)
         self.camera = (int(self.player.x - WIDTH//2), int(self.player.y - HEIGHT//2))
         self.camera = (clamp(self.camera[0], 0, GRID_W*TILE - WIDTH), clamp(self.camera[1], 0, GRID_H*TILE - HEIGHT))
 
@@ -712,11 +646,6 @@ class World:
             self.spawn_wave()
 
     def spawn_wave(self):
-        # --- immunity spawn chances scale with waves ---
-        slow_immune_chance = min(0.10 + 0.01 * self.wave, 0.40)  # up to 40%
-        dot_immune_chance  = min(0.06 + 0.008 * self.wave, 0.30) # up to 30%
-
-        # boss every 10th wave
         if self.wave % 10 == 0:
             for _tries in range(400):
                 x = random.choice([1, GRID_W - 2])
@@ -736,10 +665,7 @@ class World:
                         x = random.randrange(1, GRID_W-1)
                         y = random.choice([1, GRID_H-2])
                     if self.grid[x][y] == 0:
-                        # sprinkle immune variants among regulars
-                        im_slow = random.random() < slow_immune_chance
-                        im_dot  = random.random() < dot_immune_chance
-                        self.enemies.append(Enemy((x, y), tier=1 + self.wave // 4, immune_slow=im_slow, immune_dot=im_dot))
+                        self.enemies.append(Enemy((x, y), tier=1 + self.wave // 4))
                         break
             self.active_wave = True
             self.waiting_next_wave = False
@@ -747,7 +673,6 @@ class World:
             self.wave += 1
             return
 
-        # regular wave
         count = min(3 + self.wave, 18)
         for _ in range(count):
             for _tries in range(100):
@@ -757,9 +682,7 @@ class World:
                     x = random.randrange(1, GRID_W-1)
                     y = random.choice([1, GRID_H-2])
                 if self.grid[x][y] == 0:
-                    im_slow = random.random() < slow_immune_chance
-                    im_dot  = random.random() < dot_immune_chance
-                    self.enemies.append(Enemy((x, y), tier=1 + self.wave // 4, immune_slow=im_slow, immune_dot=im_dot))
+                    self.enemies.append(Enemy((x, y), tier=1 + self.wave // 4))
                     break
         self.active_wave = True
         self.waiting_next_wave = False
@@ -786,31 +709,6 @@ class World:
         else:
             self.say("You must be on the base to shop")
 
-    def buy(self, item):
-        p=self.player
-        if item=="critical_chance" and p.scrap>=5:
-            p.scrap-=5; p.critical_chance+=1; self.say("Critical Chance +1%")
-        elif item=="damage" and p.scrap>=7:
-            p.scrap-=7; p.attack_damage+=0.5; self.say("Damage +0.5")
-        elif item=="hp" and p.scrap>=6:
-            p.scrap-=6; p.max_hp+=10; p.hp=p.max_hp; self.say("HP +10")
-        elif item=="capacity" and p.scrap>=8:
-            p.scrap-=8; p.backpack_capacity+=3; self.say("Backpack +3")
-        elif item=="turret_basic" and p.cores>=3:
-            p.cores-=3; p.add_turret_kit("basic"); self.say("Basic turret kit acquired")
-        elif item=="turret_flame" and p.cores>=4:
-            p.cores-=4; p.add_turret_kit("flame"); self.say("Flame turret kit acquired")
-        elif item=="turret_ice" and p.cores>=4:
-            p.cores-=4; p.add_turret_kit("ice"); self.say("Ice turret kit acquired")
-        elif item=="basehp" and p.cores>=2:
-            p.cores-=2; self.base_hp=min(200, self.base_hp+30); self.say("Base repaired +30")
-        elif item=="shotspeed" and p.scrap>=4:
-            p.scrap -= 4
-            p.fire_delay = max(0.06, p.fire_delay * 0.88)
-            self.say("Shot speed (fire rate) +12%")
-        else:
-            self.say("Not enough currency")
-
     def draw(self,screen):
         ox,oy = -self.camera[0], -self.camera[1]
         screen.fill((10,10,15))
@@ -834,10 +732,6 @@ class World:
         for e in self.enemies: e.draw(screen, self.camera)
         for b in self.bullets: b.draw(screen, self.camera)
         self.player.draw(screen)
-
-        if SETTINGS.get("damage_numbers", True):
-            for dn in self.floaties:
-                dn.draw(screen, self.camera)
 
         if self.upgrade_target:
             overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
@@ -972,7 +866,7 @@ class World:
         overlay.fill((0, 0, 0, 160))
         screen.blit(overlay, (0, 0))
         title_font = pygame.font.SysFont("consolas", 36, bold=True)
-        title = title_font.render("PAUSED", True, (255, 255, 255))
+        title = title_font.render("PAUSED (world running)", True, (255, 255, 255))
         screen.blit(title, (WIDTH//2 - title.get_width()//2, HEIGHT//2 - 200))
         labels = ["Resume", "Options", "Restart", "Main Menu", "Quit"]
         btn_w, btn_h = 320, 56
@@ -985,7 +879,7 @@ class World:
             hovered = rect.collidepoint(mx,my)
             draw_button(screen, rect, label, hovered)
             rects.append((label, rect))
-        hint = pygame.font.SysFont("consolas", 16).render("Press P/Esc to resume", True, (200,210,230))
+        hint = pygame.font.SysFont("consolas", 16).render("Press P/Esc to resume • Player & Base are safe while paused", True, (200,210,230))
         screen.blit(hint, (WIDTH//2 - hint.get_width()//2, start_y + len(labels)*spacing + 10))
         return rects
 
@@ -994,7 +888,7 @@ class Player:
         self.world=world
         self.x,self.y=pos
         self.speed=2.1
-        self.critical_chance=0   # %
+        self.critical_chance=0
         self.max_hp=100; self.hp=self.max_hp
         self.attack_damage=1.0
         self.backpack=[]; self.backpack_capacity=5
@@ -1072,7 +966,7 @@ class Player:
         self.world.say("You were knocked out! Dropped some loot.", 2.5)
 
 # ----------------------------
-# Menu helpers
+# Menu helpers / UI (Menus + Controls page kept)
 # ----------------------------
 def draw_button(surface, rect, text, hovered=False):
     pygame.draw.rect(surface, (20,28,36), rect)
@@ -1117,14 +1011,11 @@ def draw_help(surface):
     lines = [
         "WASD or Arrow Keys to move",
         "Mouse to aim and Left Click to shoot",
-        "[E] deposit on base, [B] shop on base",
-        "[1-9] buy in shop, [R] restart",
-        "[Esc] or [P] pause",
-        "T to enter turret placement (Tab to cycle type)",
-        "U near a turret: open upgrade panel (1-3 to buy)",
-        "",
-        "Protect the base in the center. Collect scrap and cores.",
-        "Spend scrap/cores in the shop; upgrade turrets with scrap."
+        "[E] (universal use) on base: deposit if carrying, otherwise open/close shop",
+        "[N] start next wave",
+        "[T] place turret  •  [Tab] cycle type",
+        "[U] upgrade turret (1-3 to buy)  •  [Esc] close",
+        "[R] restart  •  [P/Esc] pause (world keeps running)"
     ]
     for i,l in enumerate(lines):
         panel.blit(font.render(l, True, WHITE), (16, 16 + i*32))
@@ -1154,19 +1045,59 @@ def draw_options(surface, selected_idx):
         f"Damage Numbers ....... {format_bool(dmg_numbers)}",
         f"Darkness Intensity ... {darkness:.1f}",
         "",
-        "Use ↑/↓ to move, ←/→ to change, Enter/Esc to go back"
+        "Use ↑/↓ to move, ←/→ to change, Enter/Esc to go back",
+        "Press [C] to open Controls"
     ]
 
-    row_y = 16
     SELECTED_COLOR = (240, 210, 90)
     UNSELECTED_COLOR = (210, 220, 235)
-
     for i, line in enumerate(opt_lines):
         color = SELECTED_COLOR if i == selected_idx else UNSELECTED_COLOR
         panel.blit(font.render(line, True, color), (16, 16 + i*34))
-        row_y += 34
 
     surface.blit(panel, (surface.get_width()//2 - panel.get_width()//2, 230))
+
+    # Buttons: Controls + Back
+    btn_w, btn_h = 280, 52
+    gap = 20
+    total_w = btn_w*2 + gap
+    start_x = surface.get_width()//2 - total_w//2
+    y = surface.get_height() - 100
+
+    mx,my = pygame.mouse.get_pos()
+    controls_rect = pygame.Rect(start_x, y, btn_w, btn_h)
+    back_rect = pygame.Rect(start_x + btn_w + gap, y, btn_w, btn_h)
+
+    draw_button(surface, controls_rect, "Controls", controls_rect.collidepoint(mx,my))
+    draw_button(surface, back_rect, "Back", back_rect.collidepoint(mx,my))
+
+    return [("Controls", controls_rect), ("Back", back_rect)]
+
+def draw_controls(surface):
+    draw_title(surface, "CONTROLS")
+    panel = pygame.Surface((760, 432))
+    panel.fill((16,22,30))
+    pygame.draw.rect(panel, (80,120,160), panel.get_rect(), 2)
+    font=pygame.font.SysFont("consolas",20)
+
+    lines = [
+        "Move ................. WASD / Arrow Keys",
+        "Aim & Shoot .......... Mouse / Left Click",
+        "Use / Interact ....... E (on base: deposit if carrying; otherwise open/close shop)",
+        "Start Next Wave ...... N",
+        "Place Turret ......... T",
+        "Cycle Turret Type .... Tab",
+        "Upgrade Turret ....... U (then 1,2,3 to buy; Esc to close)",
+        "Shop Purchases ....... 1–9 (while shop is open)",
+        "Pause ................ Esc or P (world keeps running)",
+        "Restart .............. R",
+        "Debug (dev) .......... C = loot, X = next wave",
+    ]
+
+    for i, l in enumerate(lines):
+        panel.blit(font.render(l, True, WHITE), (16, 16 + i*32))
+
+    surface.blit(panel, (surface.get_width()//2 - panel.get_width()//2, 220))
 
     rect = pygame.Rect(surface.get_width()//2 - 140, surface.get_height() - 100, 280, 52)
     mx,my = pygame.mouse.get_pos()
@@ -1190,9 +1121,9 @@ def main():
     pygame.display.set_caption("Monsters of the Deep — roguelite prototype")
     clock=pygame.time.Clock()
 
-    GRID_W, GRID_H = 1024 // TILE, 640 // TILE  # keep original world dimensions
+    GRID_W, GRID_H = 1024 // TILE, 640 // TILE  # world stays constant
 
-    game_state = "menu"
+    game_state = "menu"  # "menu", "help", "options", "controls", "playing", "paused"
     selected_index = 0
     menu_items = ["Start Game", "How to Play", "Options", "Quit"]
     options_index = 0
@@ -1200,16 +1131,15 @@ def main():
     paused=False
 
     font=pygame.font.SysFont("consolas",18)
-    help_lines=[
-        "WASD to move, Mouse to aim/shoot",
-        "[E] deposit on base, [B] shop on base",
-        "[1-9] buy in shop, [R] restart, [Esc] close shop",
-        "T place turret kit (Tab cycle) • U to upgrade turret"
-    ]
     helpsurf=pygame.Surface((620,120))
     helpsurf.fill((16,22,30))
     pygame.draw.rect(helpsurf,(80,120,160),helpsurf.get_rect(),2)
-    for i,l in enumerate(help_lines):
+    for i,l in enumerate([
+        "WASD to move, Mouse to aim/shoot",
+        "[E] universal use on base (deposit / shop)",
+        "[1-9] buy in shop, [R] restart, [Esc] close",
+        "T place turret (Tab cycle) • U to upgrade"
+    ]):
         helpsurf.blit(font.render(l,True,WHITE),(10,8+i*22))
     help_timer=5.0
 
@@ -1248,7 +1178,7 @@ def main():
                         game_state = "menu"
 
                 elif game_state == "options":
-                    total_opts = 6  # FPS, trails, dmg nums, darkness, fullscreen, size
+                    total_opts = 6
                     if ev.key in (pygame.K_ESCAPE, pygame.K_RETURN, pygame.K_SPACE):
                         save_settings()
                         game_state = "menu"
@@ -1260,6 +1190,8 @@ def main():
                         options_index = (options_index + 1) % (total_opts + 1)
                         if options_index == total_opts:
                             options_index = 0
+                    elif ev.key == pygame.K_c:
+                        game_state = "controls"
                     elif ev.key in (pygame.K_LEFT, pygame.K_a, pygame.K_RIGHT, pygame.K_d):
                         left = ev.key in (pygame.K_LEFT, pygame.K_a)
                         if options_index == 0:
@@ -1277,7 +1209,12 @@ def main():
                             screen = pygame.display.set_mode((WIDTH, HEIGHT), flags)
                         save_settings()
 
+                elif game_state == "controls":
+                    if ev.key in (pygame.K_ESCAPE, pygame.K_RETURN, pygame.K_SPACE):
+                        game_state = "options"
+
                 elif game_state == "playing":
+                    # Pause / Close panels
                     if ev.key in (pygame.K_ESCAPE, pygame.K_p):
                         if world.player.in_shop:
                             world.player.in_shop = False
@@ -1310,14 +1247,20 @@ def main():
                         elif ev.key == pygame.K_x:
                             world.wave+=1
 
-                        elif ev.key == pygame.K_b:
+                        elif ev.key == pygame.K_e:
+                            # Universal USE on base
+                            bx, by = world.base_cell[0]*TILE+TILE/2, world.base_cell[1]*TILE+TILE/2
+                            near_base = dist((world.player.x, world.player.y), (bx, by)) < world.deposit_radius
                             if world.player.in_shop:
                                 world.player.in_shop = False
+                                world.say("Closed shop")
+                            elif near_base:
+                                if world.player.backpack:
+                                    world.deposit()
+                                else:
+                                    world.open_shop()
                             else:
-                                world.open_shop()
-
-                        elif ev.key == pygame.K_e:
-                            world.deposit()
+                                world.say("Nothing to interact with")
 
                         elif ev.key == pygame.K_t:
                             avail = [t for t,c in world.player.turret_kits.items() if c>0]
@@ -1345,23 +1288,12 @@ def main():
                             else:
                                 world.say("No turret under cursor")
 
-                        elif world.player.in_shop and ev.key in (
-                            pygame.K_1, pygame.K_2, pygame.K_3, pygame.K_4,
-                            pygame.K_5, pygame.K_6, pygame.K_7, pygame.K_8, 
-                            pygame.K_9
-                        ):
-                            idx = {
-                                pygame.K_1:"speed", pygame.K_2:"damage", pygame.K_3:"hp",
-                                pygame.K_4:"capacity", pygame.K_5:"turret_basic", pygame.K_6:"basehp",
-                                pygame.K_7:"turret_flame", pygame.K_8:"turret_ice", pygame.K_9:"shotspeed"
-                            }[ev.key]
-                            world.buy(idx)
-
                         elif world.upgrade_target and ev.key in (pygame.K_1, pygame.K_2, pygame.K_3):
                             kmap = {pygame.K_1:"dmg", pygame.K_2:"rng", pygame.K_3:"rate"}
                             world.upgrade_buy(kmap[ev.key])
 
                 elif game_state == "paused":
+                    # In paused state, only menu navigation — gameplay input ignored
                     if ev.key in (pygame.K_p, pygame.K_ESCAPE):
                         paused = False
                         game_state = "playing"
@@ -1397,10 +1329,19 @@ def main():
                     if back_rect.collidepoint(mx,my):
                         game_state = "menu"
                 elif game_state == "options" and ev.button==1:
-                    back_rect = draw_options(screen, options_index)
+                    buttons = draw_options(screen, options_index)
+                    for label, rect in buttons:
+                        if rect.collidepoint(mx,my):
+                            if label == "Back":
+                                save_settings()
+                                game_state = "menu"
+                            elif label == "Controls":
+                                game_state = "controls"
+                            break
+                elif game_state == "controls" and ev.button==1:
+                    back_rect = draw_controls(screen)
                     if back_rect.collidepoint(mx,my):
-                        save_settings()
-                        game_state = "menu"
+                        game_state = "options"
                 elif game_state == "paused" and world and ev.button==1:
                     buttons = world.draw_pause_menu(screen)
                     for label, rect in buttons:
@@ -1443,19 +1384,12 @@ def main():
                         if dist((wx,wy),(world.upgrade_target.x, world.upgrade_target.y))>80:
                             world.upgrade_target=None
 
-        # Update
-        if (
-            game_state == "playing"
-            and (not paused)
-            and world
-            and (not world.player.in_shop)
-            and world.base_hp > 0
-            and (world.upgrade_target is None)
-        ):
-            world.update(dt)
+        # --- Always advance world; pass sim_paused based on game_state ---
+        if world and world.base_hp > 0:
+            world.update(dt, sim_paused=(game_state == "paused"))
 
         # Draw
-        if game_state in ("menu", "help", "options"):
+        if game_state in ("menu", "help", "options", "controls"):
             if game_state == "menu":
                 rects = draw_main_menu(screen, menu_items, -1)
                 if 0 <= selected_index < len(rects):
@@ -1464,6 +1398,8 @@ def main():
                 draw_help(screen)
             elif game_state == "options":
                 draw_options(screen, options_index)
+            elif game_state == "controls":
+                draw_controls(screen)
         else:
             if world:
                 world.draw(screen)
@@ -1473,7 +1409,7 @@ def main():
                 help_timer -= dt
                 screen.blit(helpsurf, (10, HEIGHT - helpsurf.get_height() - 10))
 
-        # overlays last
+        # Draw FPS last so it's visible over everything
         if SETTINGS.get("show_fps", True):
             fps_text = fps_font.render(f"{int(clock.get_fps())} FPS", True, (255, 255, 255))
             screen.blit(fps_text, (WIDTH - fps_text.get_width() - 10, 10))
