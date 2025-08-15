@@ -262,7 +262,7 @@ class DamageText:
     def draw(self, surf, font, cam):
         if self.life <= 0: return
         alpha = int(clamp(self.life / (1.0 if self.crit else 0.8), 0, 1) * 255)
-        txt = f"{self.amount:.0f}" if self.amount >= 1 else f"{self.amount:.1f}"
+        txt = f"{self.amount:.1f}"
         img = font.render(txt, True, self.color)
         img.set_alpha(alpha)
         px = int(self.x - cam[0]); py = int(self.y - cam[1])
